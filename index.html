@@ -2852,8 +2852,8 @@ function openAddFoto(){
 }
 
 function compressToMaxSize(img, maxBytes){
-  // Target size: 1200px HD, compress quality iteratively to fit ≤ maxBytes
-  const size=1200;
+  // Target size: 900px HD, compress quality iteratively to fit ≤ maxBytes
+  const size=900;
   const canvas=document.createElement('canvas');
   canvas.width=size;canvas.height=size;
   const ctx=canvas.getContext('2d');
@@ -2874,7 +2874,7 @@ function compressToMaxSize(img, maxBytes){
 
 function handleFotoUpload(e){
   const file=e.target.files[0];if(!file)return;
-  const MAX=5*1024*1024;
+  const MAX=250*1024;
   const wrap=document.getElementById('fotoPreviewWrap');
   wrap.innerHTML=`<div style="font-size:28px;">⏳</div><div style="font-size:12px;color:var(--t3);margin-top:6px;">Mengkonversi foto HD...</div>`;
   const reader=new FileReader();
@@ -3006,7 +3006,7 @@ function populateKatSelect(sel=''){
 }
 function handleImgUpload(e){
   const file=e.target.files[0];if(!file)return;
-  const MAX=5*1024*1024;
+  const MAX=250*1024;
   const prevEl=document.getElementById('imgPreview');
   prevEl.innerHTML='<div class="placeholder">&#9203; Mengkonversi HD...</div>';
   const reader=new FileReader();
