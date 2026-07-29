@@ -3139,14 +3139,21 @@ async function doOwnerLogin(){
     await sbAuthSignIn(AUTH_EMAIL_OWNER, p); // diverifikasi di server Supabase, bukan di browser
     _resetLoginAttempts('owner');
 
-    // ── CEK SESSION GANDA PEMILIK ──────────────────────────────
+    // ── CEK SESSION GANDA PEMILIK (lokal — sesama browser/tab) ──
     const _alreadyActive = _ownerSessionCheck();
     if(_alreadyActive){
       _showOwnerDuplicateWarning();
       return; // BLOKIR login — tampilkan peringatan dulu
     }
+    // ── CEK SESSION GANDA PEMILIK (server — lintas perangkat) ──
+    const _srv = await _ownerSrvSessionCheck();
+    if(_srv.active){
+      _showOwnerDuplicateWarning();
+      return; // BLOKIR login — tampilkan peringatan dulu
+    }
     // ──────────────────────────────────────────────────────────
 
+    _ownerMySessionId = _ownerNewSessionId();
     currentUser={role:'owner', name:'Pemilik'};
     _ownerSessionStart();  // daftarkan sesi ini
     _appInSession=true;
@@ -3207,6 +3214,8 @@ function _ownerSessionCheck(){
 function _ownerSessionStart(){
   localStorage.setItem(_OWNER_SESSION_KEY, '1');
   localStorage.setItem(_OWNER_SESSION_TS, Date.now().toString());
+  if(!_ownerMySessionId) _ownerMySessionId = _ownerNewSessionId();
+  _ownerSrvSessionWrite(); // daftarkan sesi ini ke server (agar terlihat dari device lain)
   // Mulai kirim heartbeat tiap 8 detik agar tab lain tahu kita masih aktif
   if(_ownerHeartbeatTimer) clearInterval(_ownerHeartbeatTimer);
   _ownerHeartbeatTimer = setInterval(()=>{
@@ -3215,25 +3224,106 @@ function _ownerSessionStart(){
       if(_ownerBC) _ownerBC.postMessage('owner_heartbeat');
     }
   }, _OWNER_HEARTBEAT_INTERVAL);
+  // Poll server tiap 8 detik juga — deteksi jika diambil alih dari perangkat lain
+  if(_ownerSrvPollTimer) clearInterval(_ownerSrvPollTimer);
+  _ownerSrvPollTimer = setInterval(_ownerSrvPollTakeover, _OWNER_HEARTBEAT_INTERVAL);
   // Bersihkan saat tab/window ditutup
   window.addEventListener('beforeunload', _ownerSessionEnd);
   // Mulai idle auto-logout timer
   if(typeof _ownerIdleStart === 'function') _ownerIdleStart();
 }
 
-function _ownerSessionEnd(){
+function _ownerSessionEnd(clearServer){
   if(_ownerHeartbeatTimer){ clearInterval(_ownerHeartbeatTimer); _ownerHeartbeatTimer=null; }
+  if(_ownerSrvPollTimer){ clearInterval(_ownerSrvPollTimer); _ownerSrvPollTimer=null; }
   localStorage.removeItem(_OWNER_SESSION_KEY);
   localStorage.removeItem(_OWNER_SESSION_TS);
   if(_ownerBC) _ownerBC.postMessage('owner_logout');
   // Hentikan idle auto-logout timer
   if(typeof _ownerIdleStop === 'function') _ownerIdleStop();
+  // clearServer HANYA true untuk logout yang benar-benar disengaja (manual/idle-timeout).
+  // Default (tanpa argumen) = false, supaya perilaku lama yang sudah ada TIDAK berubah.
+  if(clearServer) _ownerSrvSessionClear();
+}
+
+// ============================================================
+// OWNER SESSION LOCK (SERVER / LINTAS PERANGKAT) — tabel mc_owner_session
+// Tambahan di atas mekanisme lokal di atas (yang hanya lintas-tab/browser).
+// Didesain FAIL-OPEN: kalau tabel belum dibuat / request gagal karena jaringan,
+// Pemilik TETAP bisa login seperti biasa (dianggap tidak ada sesi lain).
+// ============================================================
+const _OWNER_SRV_TABLE   = 'mc_owner_session';
+const _OWNER_SRV_TIMEOUT = 25000; // ms — sesi lain dianggap mati jika > 25 detik tak ada heartbeat
+let   _ownerMySessionId  = null;
+let   _ownerSrvPollTimer = null;
+
+function _ownerNewSessionId(){
+  return (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : ('sid_'+Date.now()+'_'+Math.random().toString(16).slice(2));
+}
+
+// Cek ke SERVER apakah ada sesi Pemilik aktif di perangkat lain
+async function _ownerSrvSessionCheck(){
+  try{
+    const rows = await sbFetch(_OWNER_SRV_TABLE+'?select=session_id,updated_at&role=eq.owner&limit=1',{method:'GET'});
+    const row = rows && rows[0];
+    if(!row || !row.session_id) return {active:false};
+    const age = Date.now() - new Date(row.updated_at).getTime();
+    if(age > _OWNER_SRV_TIMEOUT) return {active:false}; // sesi lama/basi dianggap mati
+    return {active:true, sessionId:row.session_id};
+  }catch(e){
+    console.warn('[OwnerSession] Cek server gagal (tabel belum ada / offline?) — lanjut tanpa cek lintas-device:', e.message);
+    return {active:false, error:true}; // FAIL-OPEN
+  }
+}
+// Daftarkan/perbarui sesi milik device ini ke server
+async function _ownerSrvSessionWrite(){
+  if(!_ownerMySessionId) return;
+  try{
+    await sbUpsertRow(_OWNER_SRV_TABLE, {
+      role: 'owner',
+      session_id: _ownerMySessionId,
+      updated_at: new Date().toISOString()
+    });
+  }catch(e){
+    console.warn('[OwnerSession] Gagal menulis sesi ke server:', e.message);
+  }
+}
+// Hapus sesi di server — hanya dipanggil dari logout yang disengaja (lihat _ownerSessionEnd)
+async function _ownerSrvSessionClear(){
+  if(!_ownerMySessionId) return;
+  try{
+    await sbFetch(_OWNER_SRV_TABLE+'?role=eq.owner&session_id=eq.'+encodeURIComponent(_ownerMySessionId),{method:'DELETE'});
+  }catch(e){
+    console.warn('[OwnerSession] Gagal membersihkan sesi di server:', e.message);
+  }
+}
+// Dipanggil tiap heartbeat: deteksi apakah sesi kita sudah "diambil alih" dari device lain
+async function _ownerSrvPollTakeover(){
+  if(currentUser?.role !== 'owner' || !_ownerMySessionId) return;
+  try{
+    const rows = await sbFetch(_OWNER_SRV_TABLE+'?select=session_id&role=eq.owner&limit=1',{method:'GET'});
+    const row = rows && rows[0];
+    if(row && row.session_id && row.session_id !== _ownerMySessionId){
+      // Session_id di server sudah berubah → device lain mengambil alih
+      _ownerSessionEnd(false); // JANGAN hapus sesi server — itu milik device lain sekarang
+      _showOwnerKickedNotice();
+      currentUser = null; _appInSession = false;
+      document.getElementById('app').classList.remove('visible');
+      document.getElementById('loginPage').classList.remove('hidden');
+      const el=document.getElementById('loginPassOwner'); if(el) el.value='';
+      if(typeof setLoginTab==='function') setLoginTab('owner');
+      return;
+    }
+    _ownerSrvSessionWrite(); // masih milik kita → perbarui timestamp
+  }catch(e){
+    console.warn('[OwnerSession] Poll gagal (diabaikan, tidak logout paksa karena error jaringan):', e.message);
+  }
 }
 
 // Patch doLogoutConfirmed agar membersihkan session owner
 const _origLogoutConfirmed = window.doLogoutConfirmed;
 window.doLogoutConfirmed = function(){
-  if(currentUser?.role === 'owner') _ownerSessionEnd();
+  if(currentUser?.role === 'owner') _ownerSessionEnd(true);
   if(_origLogoutConfirmed) _origLogoutConfirmed();
   else {
     document.getElementById('modalLogoutConfirm').style.display='none';
@@ -3292,13 +3382,14 @@ function _showOwnerDuplicateWarning(){
 }
 
 async function _ownerForceLogin(){
-  // Paksa ambil alih sesi — hapus sesi lama & login
-  _ownerSessionEnd(); // bersihkan dulu
-  if(_ownerBC) _ownerBC.postMessage('owner_force_takeover'); // beritahu tab lain
+  // Paksa ambil alih sesi — hapus sesi lokal lama & login
+  _ownerSessionEnd(false); // JANGAN hapus baris server — sebentar lagi ditimpa dgn session_id baru
+  if(_ownerBC) _ownerBC.postMessage('owner_force_takeover'); // beritahu tab lain (browser sama)
   await new Promise(r=>setTimeout(r, 300)); // beri waktu tab lain merespons
   document.getElementById('modalOwnerDuplicate').style.display = 'none';
+  _ownerMySessionId = _ownerNewSessionId();
   currentUser = {role:'owner', name:'Pemilik'};
-  _ownerSessionStart();
+  _ownerSessionStart(); // ini menimpa session_id di server — device lain akan otomatis logout dlm ±8 detik
   startApp();
   showToast('👑 Sesi Pemilik berhasil diambil alih','success');
 }
@@ -3425,7 +3516,7 @@ function _ownerIdleDoLogout(){
   if(_ownerGraceTimer)   { clearTimeout(_ownerGraceTimer);   _ownerGraceTimer=null; }
   if(_ownerCountdownInt) { clearInterval(_ownerCountdownInt); _ownerCountdownInt=null; }
   if(_ownerIdleTimer)    { clearTimeout(_ownerIdleTimer);     _ownerIdleTimer=null; }
-  _ownerSessionEnd();
+  _ownerSessionEnd(true);
   _appInSession=false; currentUser=null;
   document.getElementById('app').classList.remove('visible');
   document.getElementById('loginPage').classList.remove('hidden');
