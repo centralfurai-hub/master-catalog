@@ -1583,6 +1583,8 @@ CREATE POLICY "mc_photos_update" ON storage.objects
           <button class="btn" onclick="document.getElementById('fotoCepatSearch').value='';fotoCepatFilter();">✕</button>
           <button class="btn" id="fcRefreshBtn" onclick="fotoCepatRefresh()" title="Muat ulang dari Supabase" style="white-space:nowrap;font-size:13px;">🔄</button>
         </div>
+        <button class="btn" onclick="scanAndRestorePhotosFromStorage()" style="width:100%;margin-bottom:10px;border-color:rgba(91,155,213,0.4);color:var(--blue);font-size:13px;">🔍 Scan & Pulihkan Foto dari Storage</button>
+        <div id="restorePhotoStatus" style="display:none;margin-bottom:10px;border-radius:var(--r);padding:10px 12px;font-size:12px;line-height:1.6;"></div>
         <div id="fcLoadingBar" style="display:none;margin-bottom:8px;background:rgba(201,168,76,0.1);border:1px solid rgba(201,168,76,0.25);border-radius:6px;padding:8px 12px;font-size:12px;color:var(--gold);">⏳ Memuat data produk dari Supabase...</div>
         <div style="margin-bottom:4px;font-size:11px;color:var(--t3);display:flex;gap:12px;flex-wrap:wrap;">
           <span>📦 Total: <b id="fcStatTotal" style="color:var(--t);">0</b></span>
@@ -2345,6 +2347,68 @@ async function sbUpsertProduct(p){
   }
 }
 // Update foto saja — tidak menyentuh field divisi/stok sama sekali
+// ============================================================
+// ANTRIAN RETRY OTOMATIS — SIMPAN URL FOTO KE DATABASE
+// Mencegah kasus "upload sukses ke Storage, tapi update DB gagal
+// diam-diam" (foto tampil sesaat lalu 'hilang' setelah refresh).
+// Item yang gagal disimpan di localStorage → otomatis dicoba lagi
+// tiap ±25 detik dan setiap koneksi internet kembali online,
+// sampai berhasil atau berhasil di-load ulang di sesi berikutnya.
+// ============================================================
+const _PENDING_PHOTO_KEY = 'mc_pending_photo_sync';
+
+function _loadPendingPhotoQueue(){
+  try{ return JSON.parse(localStorage.getItem(_PENDING_PHOTO_KEY)||'[]'); }
+  catch(_){ return []; }
+}
+function _savePendingPhotoQueue(arr){
+  try{ localStorage.setItem(_PENDING_PHOTO_KEY, JSON.stringify(arr)); }catch(_){}
+}
+function _queuePendingPhotoSync(item){
+  const q = _loadPendingPhotoQueue();
+  const idx = q.findIndex(x=>x.id===item.id);
+  const entry = {...item, attempts:(idx>=0?q[idx].attempts:0), queuedAt: idx>=0?q[idx].queuedAt:Date.now()};
+  if(idx>=0) q[idx]=entry; else q.push(entry);
+  _savePendingPhotoQueue(q);
+}
+let _pendingPhotoTimer = null;
+async function _processPendingPhotoSync(){
+  if(sbMode!=='online') return;
+  let q = _loadPendingPhotoQueue();
+  if(!q.length) return;
+  let successCount = 0;
+  const stillPending = [];
+  for(const item of q){
+    try{
+      const patchUrl = sbUrl+'/rest/v1/mc_products?id=eq.'+encodeURIComponent(item.id);
+      const headers = {
+        'apikey':sbKey, 'Authorization':'Bearer '+(sbAccessToken||sbKey),
+        'Content-Type':'application/json', 'Prefer':'return=minimal'
+      };
+      const res = await fetch(patchUrl, {method:'PATCH', headers, body:JSON.stringify({
+        img: item.imgUrl, ukuran: item.ukuran||'', warna: item.warna||'',
+        material: item.material||'', keterangan: item.keterangan||'',
+        updated_at: new Date().toISOString()
+      })});
+      if(res.ok){ successCount++; }
+      else if(item.attempts >= 8){ /* sudah dicoba 8x — biarkan di antrian tapi jangan spam, sistem "Scan & Pulihkan" bisa perbaiki manual nanti */ stillPending.push({...item, attempts:item.attempts+1}); }
+      else stillPending.push({...item, attempts:item.attempts+1});
+    }catch(e){
+      stillPending.push({...item, attempts:item.attempts+1});
+    }
+  }
+  _savePendingPhotoQueue(stillPending);
+  if(successCount>0){
+    showToast(`✅ ${successCount} URL foto yang sempat gagal tersimpan, sekarang berhasil disinkronkan`,'success');
+    if(typeof renderKatalog==='function') renderKatalog();
+  }
+}
+function _startPendingPhotoRetryLoop(){
+  if(_pendingPhotoTimer) clearInterval(_pendingPhotoTimer);
+  _pendingPhotoTimer = setInterval(_processPendingPhotoSync, 25000);
+  window.addEventListener('online', _processPendingPhotoSync);
+}
+
 async function sbUpsertFotoOnly(id, imgUrl, ukuran, keterangan, updatedAt, warna, material){
   if(sbMode!=='online') return;
   try{
@@ -2388,11 +2452,19 @@ async function sbUpsertFotoOnly(id, imgUrl, ukuran, keterangan, updatedAt, warna
     } else {
       const res2Text = await res2.text().catch(()=>'');
       console.error('sbUpsertFotoOnly retry PATCH GAGAL ('+res2.status+'):', res2Text);
-      showToast('⚠️ Gagal simpan URL foto ke database: '+res2.status,'error');
+      // FIX: dulu di sini hanya toast error lalu diam — URL foto yang gagal
+      // tersimpan jadi hilang begitu halaman di-refresh (foto "menghilang").
+      // Sekarang: masukkan ke antrian retry persisten, dicoba lagi otomatis.
+      _queuePendingPhotoSync({id, imgUrl, ukuran, keterangan, warna, material});
+      _startPendingPhotoRetryLoop();
+      showToast('⚠️ Simpan foto ke database gagal sementara — akan dicoba lagi otomatis di latar belakang','error');
     }
   }catch(e){
     console.error('sbUpsertFotoOnly error:',e);
-    showToast('⚠️ Error simpan foto: '+e.message,'error');
+    // Exception jaringan (mis. benar-benar offline) — masukkan juga ke antrian retry
+    _queuePendingPhotoSync({id, imgUrl, ukuran, keterangan, warna, material});
+    _startPendingPhotoRetryLoop();
+    showToast('⚠️ Koneksi bermasalah saat simpan foto — akan dicoba lagi otomatis','error');
   }
 }
 async function sbDeleteProduct(id){if(sbMode!=='online')return;try{await sbDeleteRow('mc_products','id=eq.'+encodeURIComponent(id));}catch(e){}}
@@ -3749,6 +3821,11 @@ async function startApp(){
   _appInSession = true;
   _initBackButtonGuard();
 
+  // Coba sinkronkan ulang URL foto yang sempat gagal tersimpan di sesi sebelumnya
+  if(sbMode==='online'){
+    setTimeout(()=>{ _processPendingPhotoSync(); _startPendingPhotoRetryLoop(); }, 2500);
+  }
+
   const role = currentUser.role;
   const roleLabels = {guest:'Tamu', spg:'SPG', owner:'Pemilik'};
   const roleDesc   = {guest:'Pengunjung', spg:'Sales Promotion Girl', owner:'Pemilik / Owner'};
@@ -4590,7 +4667,7 @@ async function scanAndRestorePhotosFromStorage(){
     showStatus('❌ Error: '+e.message,'var(--red)');
     showToast('❌ Gagal scan Storage: '+e.message,'error');
   }finally{
-    if(btn){ btn.disabled=false; btn.textContent='🔍 Scan & Pulihkan'; }
+    if(btn){ btn.disabled=false; btn.textContent='🔍 Scan & Pulihkan Foto dari Storage'; }
   }
 }
 
