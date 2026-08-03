@@ -2289,7 +2289,7 @@ async function initFromSupabase(forceRefresh=false){
         return {
           id:r.id,name:r.name,alias:r.alias||'',harga:r.harga||0,
           kategori:safeKat,ukuran:r.ukuran||'',keterangan:r.keterangan||'',
-          divisi,img:r.img||'',createdAt:r.created_at,updatedAt:r.updated_at
+          divisi,img:r.img||'',sku:r.sku||'',createdAt:r.created_at,updatedAt:r.updated_at
         };
       });
       
@@ -7650,7 +7650,7 @@ updateOnlineStatus();
               const safeKat = (rawKat && rawKat.length>1 && !/^\d+$/.test(rawKat) && rawKat.toLowerCase()!=='kategori') ? rawKat : (localProd?.kategori||'');
               return {id:r.id,name:r.name,alias:r.alias||'',harga:r.harga||0,
                 kategori:safeKat,ukuran:r.ukuran||'',keterangan:r.keterangan||'',
-                divisi,img:r.img||'',createdAt:r.created_at,updatedAt:r.updated_at};
+                divisi,img:r.img||'',sku:r.sku||'',createdAt:r.created_at,updatedAt:r.updated_at};
             });
             // Data sudah di memory — tidak perlu saveAll ke localStorage
             if(typeof renderKatalog==='function' && currentUser) renderKatalog();
@@ -7933,7 +7933,7 @@ async function fotoCepatRefresh(){
         const safeKat=(rawKat&&rawKat.length>1&&!/^\d+$/.test(rawKat)&&rawKat.toLowerCase()!=='kategori')?rawKat:(localProd?.kategori||'');
         return{id:r.id,name:r.name,alias:r.alias||'',harga:r.harga||0,
           kategori:safeKat,ukuran:r.ukuran||'',keterangan:r.keterangan||'',
-          divisi,img:r.img||'',createdAt:r.created_at,updatedAt:r.updated_at};
+          divisi,img:r.img||'',sku:r.sku||'',createdAt:r.created_at,updatedAt:r.updated_at};
       });
       // Data sudah di memory — tidak perlu saveAll
       if(bar){ bar.style.color='var(--green)'; bar.textContent='✅ '+prods.length+' produk berhasil dimuat dari Supabase!'; }
