@@ -6621,12 +6621,12 @@ function _resolveKatFromParsed(rawKat, allParsedKats){
 }
 // ──────────────────────────────────────────────────────────
 function downloadBersihXlsx(parsed, origFileName){
-  // Buat workbook baru — format data_tanpa_header: 4 kolom, tanpa header, tanpa spacer
+  // Buat workbook baru — format data_tanpa_header: 5 kolom (name, stok, harga, kategori, sku), tanpa header, tanpa spacer
   const ws = XLSX.utils.aoa_to_sheet(
-    parsed.map(p => [p.name, p.stok, p.harga, p.kategori])
+    parsed.map(p => [p.name, p.stok, p.harga, p.kategori, p.sku||''])
   );
   // Lebar kolom agar rapi
-  ws['!cols'] = [{wch:60},{wch:10},{wch:14},{wch:30}];
+  ws['!cols'] = [{wch:60},{wch:10},{wch:14},{wch:30},{wch:18}];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Data Bersih');
   // Nama file: ganti ekstensi, tambah suffix _bersih
@@ -6803,6 +6803,15 @@ async function handleImportAccurate(e){
         showToast('Tidak ada produk terbaca — pastikan file Accurate yang benar','error');
         return;
       }
+
+      // ── Cocokkan setiap produk ke data existing untuk ambil SKU-nya ──
+      parsed.forEach(item=>{
+        const existingForSku=products.find(p=>
+          normName(p.name)===normName(item.name)||
+          (p.alias&&normName(p.alias)===normName(item.name))
+        );
+        item.sku = existingForSku ? (existingForSku.sku||'') : '';
+      });
 
       // ── DOWNLOAD LANGSUNG sebagai Excel Bersih (format data_tanpa_header) ──
       downloadBersihXlsx(parsed, origFileName);
@@ -7178,6 +7187,15 @@ async function handleImportAccurateDivisi(e, divisiKey, resultId){
         showToast('Tidak ada produk terbaca — pastikan file Accurate yang benar','error');
         return;
       }
+
+      // ── Cocokkan setiap produk ke data existing untuk ambil SKU-nya ──
+      parsed.forEach(item=>{
+        const existingForSku=products.find(p=>
+          normName(p.name)===normName(item.name)||
+          (p.alias&&normName(p.alias)===normName(item.name))
+        );
+        item.sku = existingForSku ? (existingForSku.sku||'') : '';
+      });
 
       // Download Excel bersih
       downloadBersihXlsx(parsed, origFileName);
