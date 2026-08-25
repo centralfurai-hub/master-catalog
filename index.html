@@ -1157,11 +1157,12 @@ CREATE TABLE IF NOT EXISTS mc_products (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, alias TEXT,
   harga BIGINT DEFAULT 0, kategori TEXT, keterangan TEXT,
   divisi JSONB DEFAULT '{"Global":0,"Central":0,"Celine":0,"Panda":0,"Titipan":0,"Servicean":0}',
-  img TEXT,
+  img TEXT, sku TEXT, accurate_code TEXT,
   created_at TEXT, updated_at TEXT
 );
--- INDEX untuk pencarian cepat berdasarkan nama
+-- INDEX untuk pencarian cepat berdasarkan nama & kode barang Accurate
 CREATE INDEX IF NOT EXISTS idx_mc_products_name ON mc_products(name);
+CREATE INDEX IF NOT EXISTS idx_mc_products_accurate_code ON mc_products(accurate_code) WHERE accurate_code IS NOT NULL AND accurate_code <> '';
 CREATE TABLE IF NOT EXISTS mc_categories (id SERIAL PRIMARY KEY, name TEXT UNIQUE NOT NULL);
 CREATE TABLE IF NOT EXISTS mc_log (id SERIAL PRIMARY KEY, msg TEXT, type TEXT, username TEXT, created_at TEXT);
 
@@ -2289,7 +2290,7 @@ async function initFromSupabase(forceRefresh=false){
         return {
           id:r.id,name:r.name,alias:r.alias||'',harga:r.harga||0,
           kategori:safeKat,ukuran:r.ukuran||'',keterangan:r.keterangan||'',
-          divisi,img:r.img||'',sku:r.sku||'',createdAt:r.created_at,updatedAt:r.updated_at
+          divisi,img:r.img||'',sku:r.sku||'',accurateCode:r.accurate_code||'',createdAt:r.created_at,updatedAt:r.updated_at
         };
       });
       
@@ -5935,21 +5936,25 @@ function _parseAccurateRows(rows){
 
   // Cari baris header (baris pertama yg mengandung kata kunci umum Accurate)
   // Header bisa di baris 0–4 (ada file yg punya judul di atas)
-  const KW_NAMA=['nama','barang','item','produk','kode','deskripsi','description','name'];
+  // KW_KODE dicek LEBIH DULU & terpisah dari KW_NAMA — supaya kolom "Kode Barang"
+  // tidak salah kedeteksi sebagai kolom nama (dulu 'kode' & 'barang' campur di KW_NAMA).
+  const KW_KODE=['kode barang','kode item','no. barang','no barang','item code','kode'];
+  const KW_NAMA=['nama barang','nama item','nama produk','item name','product name','deskripsi','description','nama','barang','item','produk','name'];
   const KW_STOK=['stok','stock','qty','jumlah','saldo','kuantitas','quantity'];
   const KW_HARGA=['harga','price','nilai','amount','rate'];
   const KW_KAT=['kategori','category','kat','group','kelompok','tipe','type'];
 
   let headerRowIdx=-1;
-  let colNama=-1, colStok=-1, colHarga=-1, colKat=-1;
+  let colNama=-1, colStok=-1, colHarga=-1, colKat=-1, colKode=-1;
 
   for(let ri=0;ri<Math.min(8,rows.length);ri++){
     const row=(rows[ri]||[]).map(c=>String(c||'').trim().toLowerCase());
-    const namaIdx=row.findIndex(c=>KW_NAMA.some(k=>c.includes(k)));
+    const kodeIdx=row.findIndex(c=>KW_KODE.some(k=>c.includes(k)));
+    const namaIdx=row.findIndex((c,ci)=>ci!==kodeIdx && KW_NAMA.some(k=>c.includes(k)));
     const stokIdx=row.findIndex(c=>KW_STOK.some(k=>c.includes(k)));
     if(namaIdx>=0 && stokIdx>=0){
       headerRowIdx=ri;
-      colNama=namaIdx; colStok=stokIdx;
+      colNama=namaIdx; colStok=stokIdx; colKode=kodeIdx;
       colHarga=row.findIndex(c=>KW_HARGA.some(k=>c.includes(k)));
       colKat=row.findIndex(c=>KW_KAT.some(k=>c.includes(k)));
       break;
@@ -5957,7 +5962,7 @@ function _parseAccurateRows(rows){
     // Header parsial — hanya nama ada (stok di kolom 1 asumsi)
     if(namaIdx>=0 && ri===0){
       headerRowIdx=ri;
-      colNama=namaIdx; colStok=namaIdx+1;
+      colNama=namaIdx; colStok=namaIdx+1; colKode=kodeIdx;
       colHarga=row.findIndex(c=>KW_HARGA.some(k=>c.includes(k)));
       colKat=row.findIndex(c=>KW_KAT.some(k=>c.includes(k)));
     }
@@ -5968,7 +5973,7 @@ function _parseAccurateRows(rows){
     dataRows=rows.slice(headerRowIdx+1);
   } else {
     // Tidak ada header — asumsikan kolom 0=nama, kolom 1=stok (format Accurate lama)
-    colNama=0; colStok=1; colHarga=2; colKat=3;
+    colNama=0; colStok=1; colHarga=2; colKat=3; colKode=-1;
     dataRows=rows;
   }
 
@@ -5988,10 +5993,11 @@ function _parseAccurateRows(rows){
     })
     .map(r=>{
       const name=String(r[colNama]||'').trim().replace(/\s+/g,' ');
+      const kode=colKode>=0 ? String(r[colKode]||'').trim() : '';
       const stok=Math.max(0, parseFloat(String(r[colStok]||'').replace(/[^0-9.\-]/g,''))||0);
       const harga=colHarga>=0 ? (parseInt(String(r[colHarga]||'').replace(/[^0-9]/g,''))||0) : 0;
       const kat=colKat>=0 ? String(r[colKat]||'').trim().toUpperCase() : '';
-      return {name, stok:Math.round(stok), harga, kat};
+      return {name, kode, stok:Math.round(stok), harga, kat};
     })
     .filter(r=>r.name.length>1);
 }
@@ -6041,6 +6047,7 @@ function handleImportDivisi(e, divisiKey, resultId){
       }
 
       const fileNames=new Set(parsedRows.map(r=>normName(r.name)));
+      const fileKodes=new Set(parsedRows.map(r=>r.kode).filter(Boolean));
       let added=0, updated=0;
       const preview=[];
       const toSyncUpsert=[];
@@ -6063,15 +6070,20 @@ function handleImportDivisi(e, divisiKey, resultId){
       // TIDAK menghapus produk — hanya update stok divisi yang diimport.
       // Produk dari divisi lain yang tidak ada di file ini tetap dipertahankan.
       parsedRows.forEach(r=>{
-        const {name, stok, harga, kat}=r;
+        const {name, kode, stok, harga, kat}=r;
         if(!name) return;
 
-        const existing=products.find(p=>
-          normName(p.name)===normName(name)||
-          (p.alias && normName(p.alias)===normName(name))
-        );
+        // Prioritas 1: cocokkan via Kode Barang Accurate (stabil, tidak terpengaruh typo/edit nama)
+        // Prioritas 2 (fallback): cocokkan via nama, seperti sebelumnya
+        const existing=(kode && products.find(p=>p.accurateCode && p.accurateCode===kode))
+          || products.find(p=>
+            normName(p.name)===normName(name)||
+            (p.alias && normName(p.alias)===normName(name))
+          );
 
         if(existing){
+          // Belajar mapping: sekali produk ini ketemu kodenya, simpan untuk import berikutnya
+          if(kode && existing.accurateCode!==kode) existing.accurateCode=kode;
           // Pastikan semua field divisi ada
           existing.divisi=existing.divisi||{};
           if(!existing.divisi.hasOwnProperty('Central'))   existing.divisi.Central=0;
@@ -6115,7 +6127,7 @@ function handleImportDivisi(e, divisiKey, resultId){
             id:'p'+Date.now()+Math.floor(Math.random()*9999),
             name, alias:_restoredAlias, harga:harga||0,
             kategori:safeKat, keterangan:_restoredKet,
-            divisi, img:_restoredImg,
+            divisi, img:_restoredImg, accurateCode:kode||'',
             createdAt:new Date().toISOString(), updatedAt:new Date().toISOString()
           };
           products.unshift(newProd); added++;
@@ -6131,7 +6143,7 @@ function handleImportDivisi(e, divisiKey, resultId){
       let zeroed=0, purged=0;
       const toPurge=[];
       products.forEach(p=>{
-        const inFile=fileNames.has(normName(p.name))||(p.alias&&fileNames.has(normName(p.alias)));
+        const inFile=fileNames.has(normName(p.name))||(p.alias&&fileNames.has(normName(p.alias)))||(p.accurateCode&&fileKodes.has(p.accurateCode));
         if(!inFile && p.divisi){
           if(p.divisi[divisiKey]>0){
             p.divisi[divisiKey]=0;
@@ -6189,7 +6201,7 @@ function handleImportDivisi(e, divisiKey, resultId){
         const rows2=toSyncUpsert.filter(p=>{if(uniqueIds.has(p.id))return false;uniqueIds.add(p.id);return true;}).map(p=>({
           id:p.id, name:p.name, alias:p.alias||'', harga:p.harga||0,
           kategori:p.kategori||'', keterangan:p.keterangan||'',
-          divisi:p.divisi||{}, img:p.img||'',
+          divisi:p.divisi||{}, img:p.img||'', accurate_code:p.accurateCode||'',
           created_at:p.createdAt, updated_at:p.updatedAt
         }));
         const chunkSize=50;
@@ -7084,6 +7096,9 @@ async function handleImportAccurateDivisi(e, divisiKey, resultId){
         const colStok  = headerRow.findIndex(c=>typeof c==='string'&&(c.trim()==='Stok Global'||c.trim()==='Stok Gudang'||c.trim()==='Stok dapat dijual'));
         const colHarga = headerRow.findIndex(c=>typeof c==='string'&&(c.trim()==='HARGA JUAL'||c.trim()==='Harga Jual'||c.trim()==='Def. Hrg. Jual Satuan #1'));
         const colKat   = headerRow.findIndex(c=>typeof c==='string'&&c.trim()==='Kategori Barang');
+        // Kolom Kode Barang Accurate (opsional) — kalau ada, dipakai untuk matching yang stabil
+        // terhadap ganti nama/typo. Centang kolom ini saat export dari Accurate kalau belum muncul.
+        const colKode  = headerRow.findIndex(c=>typeof c==='string'&&['kode barang','no. barang','no barang','kode item','item code'].includes(c.trim().toLowerCase()));
 
         function isHeaderRow(row){
           return (colNama>=0 && String(row[colNama]||'').trim()==='Nama Barang')||
@@ -7106,6 +7121,7 @@ async function handleImportAccurateDivisi(e, divisiKey, resultId){
           if(isHeaderRow(row)) return;
           const cellNama = colNama>=0 ? String(row[colNama]||'').trim() : '';
           const cellKat  = colKat>=0  ? String(row[colKat]||'').trim()  : '';
+          const cellKode = colKode>=0 ? String(row[colKode]||'').trim() : '';
           if(isContinuationRow(row, cellNama)){
             if(lastParsed){
               if(cellNama) lastParsed.name     = (lastParsed.name     + ' ' + cellNama).trim();
@@ -7120,7 +7136,7 @@ async function handleImportAccurateDivisi(e, divisiKey, resultId){
                        : Math.max(0, Math.round(parseFloat(String(rawStok).replace(',','.'))||0));
           const harga = typeof rawHarga==='number' && rawHarga>1 ? Math.round(rawHarga)
                        : (parseFloat(String(rawHarga).replace(',','.'))||0)>1 ? Math.round(parseFloat(String(rawHarga).replace(',','.'))):0;
-          const produk = {name:cellNama, kategori:cellKat||'LAINNYA', stok, harga};
+          const produk = {name:cellNama, kategori:cellKat||'LAINNYA', stok, harga, kode:cellKode};
           parsed.push(produk);
           lastParsed=produk;
         });
@@ -7190,10 +7206,11 @@ async function handleImportAccurateDivisi(e, divisiKey, resultId){
 
       // ── Cocokkan setiap produk ke data existing untuk ambil SKU-nya ──
       parsed.forEach(item=>{
-        const existingForSku=products.find(p=>
-          normName(p.name)===normName(item.name)||
-          (p.alias&&normName(p.alias)===normName(item.name))
-        );
+        const existingForSku=(item.kode && products.find(p=>p.accurateCode && p.accurateCode===item.kode))
+          || products.find(p=>
+            normName(p.name)===normName(item.name)||
+            (p.alias&&normName(p.alias)===normName(item.name))
+          );
         item.sku = existingForSku ? (existingForSku.sku||'') : '';
       });
 
@@ -7201,6 +7218,7 @@ async function handleImportAccurateDivisi(e, divisiKey, resultId){
       downloadBersihXlsx(parsed, origFileName);
 
       const fileNames=new Set(parsed.map(p=>normName(p.name)));
+      const fileKodes=new Set(parsed.map(p=>p.kode).filter(Boolean));
       let added=0,updated=0,deleted=0;
       const preview=[];
       const toSync=[];
@@ -7225,7 +7243,7 @@ async function handleImportAccurateDivisi(e, divisiKey, resultId){
       // Produk yang tidak ada di file ini → stok divisiKey-nya di-nol-kan (TIDAK dihapus)
       // Stok divisi lain tetap dipertahankan
       products.forEach(p=>{
-        const inFile=fileNames.has(normName(p.name))||(p.alias&&fileNames.has(normName(p.alias)));
+        const inFile=fileNames.has(normName(p.name))||(p.alias&&fileNames.has(normName(p.alias)))||(p.accurateCode&&fileKodes.has(p.accurateCode));
         if(!inFile){
           p.divisi=p.divisi||{Central:0,Celine:0,Panda:0,Global:0,Titipan:0,Servicean:0};
           if(p.divisi[divisiKey]>0){
@@ -7240,11 +7258,14 @@ async function handleImportAccurateDivisi(e, divisiKey, resultId){
 
       // Update / tambah produk dari file
       parsed.forEach(item=>{
-        const existing=products.find(p=>
-          normName(p.name)===normName(item.name)||
-          (p.alias&&normName(p.alias)===normName(item.name))
-        );
+        const existing=(item.kode && products.find(p=>p.accurateCode && p.accurateCode===item.kode))
+          || products.find(p=>
+            normName(p.name)===normName(item.name)||
+            (p.alias&&normName(p.alias)===normName(item.name))
+          );
         if(existing){
+          // Belajar mapping: sekali produk ini ketemu kodenya, simpan untuk import berikutnya
+          if(item.kode && existing.accurateCode!==item.kode) existing.accurateCode=item.kode;
           // Pastikan divisi ada, tapi JANGAN reset field lain (img, alias, keterangan tetap utuh!)
           existing.divisi=existing.divisi||{Central:0,Celine:0,Panda:0,Global:0,Titipan:0,Servicean:0};
           if(!existing.divisi.hasOwnProperty('Central'))   existing.divisi.Central=0;
@@ -7280,7 +7301,7 @@ async function handleImportAccurateDivisi(e, divisiKey, resultId){
             name:item.name, alias:_divAliasMap[_nk2]||'',
             harga:item.harga, kategori:item.kategori||'LAINNYA', keterangan:_divKetMap[_nk2]||'',
             divisi:{Central:_ct2,Celine:_cl2,Panda:_pa2,Global:_gl2,Titipan:_ti2,Servicean:_sv2},
-            img:_divImgMap[_nk2]||'',
+            img:_divImgMap[_nk2]||'', accurateCode:item.kode||'',
             createdAt:new Date().toISOString(), updatedAt:new Date().toISOString()
           };
           products.unshift(np); added++;
@@ -7311,7 +7332,7 @@ async function handleImportAccurateDivisi(e, divisiKey, resultId){
         const rows=toSync.map(p=>({
           id:p.id, name:p.name, alias:p.alias||'', harga:p.harga||0,
           kategori:p.kategori||'', keterangan:p.keterangan||'',
-          divisi:p.divisi||{}, img:p.img||'',
+          divisi:p.divisi||{}, img:p.img||'', accurate_code:p.accurateCode||'',
           created_at:p.createdAt, updated_at:p.updatedAt
         }));
         const chunkSize=50;
@@ -7650,7 +7671,7 @@ updateOnlineStatus();
               const safeKat = (rawKat && rawKat.length>1 && !/^\d+$/.test(rawKat) && rawKat.toLowerCase()!=='kategori') ? rawKat : (localProd?.kategori||'');
               return {id:r.id,name:r.name,alias:r.alias||'',harga:r.harga||0,
                 kategori:safeKat,ukuran:r.ukuran||'',keterangan:r.keterangan||'',
-                divisi,img:r.img||'',sku:r.sku||'',createdAt:r.created_at,updatedAt:r.updated_at};
+                divisi,img:r.img||'',sku:r.sku||'',accurateCode:r.accurate_code||'',createdAt:r.created_at,updatedAt:r.updated_at};
             });
             // Data sudah di memory — tidak perlu saveAll ke localStorage
             if(typeof renderKatalog==='function' && currentUser) renderKatalog();
@@ -7933,7 +7954,7 @@ async function fotoCepatRefresh(){
         const safeKat=(rawKat&&rawKat.length>1&&!/^\d+$/.test(rawKat)&&rawKat.toLowerCase()!=='kategori')?rawKat:(localProd?.kategori||'');
         return{id:r.id,name:r.name,alias:r.alias||'',harga:r.harga||0,
           kategori:safeKat,ukuran:r.ukuran||'',keterangan:r.keterangan||'',
-          divisi,img:r.img||'',sku:r.sku||'',createdAt:r.created_at,updatedAt:r.updated_at};
+          divisi,img:r.img||'',sku:r.sku||'',accurateCode:r.accurate_code||'',createdAt:r.created_at,updatedAt:r.updated_at};
       });
       // Data sudah di memory — tidak perlu saveAll
       if(bar){ bar.style.color='var(--green)'; bar.textContent='✅ '+prods.length+' produk berhasil dimuat dari Supabase!'; }
