@@ -1758,6 +1758,20 @@ CREATE POLICY "mc_photos_update" ON storage.objects
         </div>
         <div id="backupList"></div>
 
+        <!-- ── TOOL: KOMPRES ULANG FOTO LAMA (sekali jalan) ── -->
+        <div style="background:var(--bg2);border:1px solid var(--bd2);border-radius:var(--r);padding:16px 16px 14px;margin-top:16px;">
+          <div style="font-size:13px;font-weight:700;color:var(--gold);margin-bottom:4px;">🗜️ Kompres Ulang Foto Lama</div>
+          <div style="font-size:11px;color:var(--t3);margin-bottom:10px;line-height:1.6;">
+            Mengecilkan ukuran foto produk yang SUDAH ada (upload sebelumnya) agar katalog lebih ringan & tidak lemot saat scroll di HP.
+            Tidak mengubah tampilan atau cara kerja — hanya memperkecil ukuran file foto di Storage.
+            Proses ini bisa memakan waktu beberapa menit tergantung jumlah foto.
+          </div>
+          <button class="btn btn-primary" onclick="compressAllExistingPhotos()" id="btnCompressOld" style="width:100%;">
+            🗜️ Mulai Kompres Ulang Semua Foto
+          </button>
+          <div id="compressOldStatus" style="display:none;margin-top:10px;font-size:12px;line-height:1.6;background:var(--bg3);border:1px solid var(--bd2);border-radius:8px;padding:10px 12px;"></div>
+        </div>
+
         <!-- ── TOOL DEBUG PENCARIAN PRODUK ── -->
         <div style="background:var(--bg2);border:1px solid var(--bd2);border-radius:var(--r);padding:16px 16px 14px;margin-top:16px;">
           <div style="font-size:13px;font-weight:700;color:var(--gold);margin-bottom:4px;">🔍 Debug — Cari Produk di Database</div>
@@ -4336,6 +4350,101 @@ function updateStatCardActive(){
 }
 // renderKatalogStat dihapus — sekarang semua filter ditangani oleh renderKatalog
 function renderKatalogStat(){ renderKatalog(); }
+
+// ============================================================
+// KOMPRES ULANG FOTO LAMA — tidak mengubah alur upload/tampilan
+// Foto lama (resolusi/ukuran besar) diperkecil ke standar baru
+// (600px, ~300KB), lalu ditimpa di path Storage yang SAMA.
+// ============================================================
+function _resizeBlobToTarget(blob, size, maxBytes){
+  return new Promise((resolve,reject)=>{
+    const url=URL.createObjectURL(blob);
+    const img=new Image();
+    img.onload=()=>{
+      try{
+        const canvas=document.createElement('canvas');
+        canvas.width=size;canvas.height=size;
+        const ctx=canvas.getContext('2d');
+        ctx.fillStyle='#1e1e1e';ctx.fillRect(0,0,size,size);
+        const scale=Math.min(size/img.width,size/img.height);
+        ctx.drawImage(img,(size-img.width*scale)/2,(size-img.height*scale)/2,img.width*scale,img.height*scale);
+        const qualities=[0.85,0.78,0.70,0.60,0.50,0.40];
+        let done=false;
+        function tryQuality(i){
+          canvas.toBlob(b=>{
+            if(done) return;
+            const isLast=i>=qualities.length-1;
+            if(b && (b.size<=maxBytes || isLast)){
+              done=true; URL.revokeObjectURL(url); resolve(b);
+            } else {
+              tryQuality(i+1);
+            }
+          },'image/jpeg',qualities[i]);
+        }
+        tryQuality(0);
+      }catch(err){ URL.revokeObjectURL(url); reject(err); }
+    };
+    img.onerror=()=>{ URL.revokeObjectURL(url); reject(new Error('Gagal memuat gambar')); };
+    img.src=url;
+  });
+}
+
+async function compressAllExistingPhotos(){
+  if(!can('adminMenu')){ showToast('⛔ Hanya Pemilik yang dapat menjalankan ini','error'); return; }
+  if(sbMode!=='online'){ showToast('⚠️ Perlu koneksi Supabase','error'); return; }
+
+  const statusEl=document.getElementById('compressOldStatus');
+  const btn=document.getElementById('btnCompressOld');
+  const showSt=(msg,color='var(--t2)')=>{ if(statusEl){statusEl.style.display='block';statusEl.style.color=color;statusEl.innerHTML=msg;} };
+
+  const targets=products.filter(p=>p.img && p.img.includes('/mc-photos/'));
+  if(!targets.length){ showToast('Tidak ada foto untuk dikompres','info'); return; }
+
+  if(!confirm(`Kompres ulang ${targets.length} foto? Proses ini tidak bisa dibatalkan di tengah jalan.`)) return;
+
+  if(btn){ btn.disabled=true; btn.textContent='⏳ Memproses...'; }
+  let done=0, success=0, failed=0;
+
+  for(const p of targets){
+    done++;
+    showSt(`⏳ Memproses ${done}/${targets.length}: ${esc(p.name)}`);
+    try{
+      const cleanUrl=p.img.split('?')[0];
+      const filename=cleanUrl.split('/storage/v1/object/public/mc-photos/').pop();
+      if(!filename) throw new Error('Nama file tidak terdeteksi');
+
+      const res=await fetch(cleanUrl);
+      if(!res.ok) throw new Error('Gagal unduh foto lama');
+      const origBlob=await res.blob();
+
+      // Skip kalau sudah kecil (di bawah 320KB) — hemat waktu proses
+      if(origBlob.size<=320*1024){ success++; continue; }
+
+      const newBlob=await _resizeBlobToTarget(origBlob, 600, 300*1024);
+
+      const uploadUrl=`${sbUrl}/storage/v1/object/mc-photos/${filename}`;
+      const headers={'apikey':sbKey,'Authorization':'Bearer '+(sbAccessToken||sbKey),'Content-Type':'image/jpeg','x-upsert':'true'};
+      const putRes=await fetch(uploadUrl,{method:'PUT',headers,body:newBlob});
+      if(!putRes.ok) throw new Error('Upload ulang gagal ('+putRes.status+')');
+
+      const newImgUrl=`${sbUrl}/storage/v1/object/public/mc-photos/${filename}?t=${Date.now()}`;
+      p.img=newImgUrl; p.updatedAt=new Date().toISOString();
+      await sbUpsertFotoOnly(p.id, newImgUrl, p.ukuran||'', p.keterangan||'', p.updatedAt, p.warna||'', p.material||'');
+      success++;
+    }catch(err){
+      console.warn('compressAllExistingPhotos gagal untuk', p.name, err.message);
+      failed++;
+    }
+    // Jeda kecil antar foto agar tidak membebani koneksi/Storage sekaligus
+    await new Promise(r=>setTimeout(r,150));
+  }
+
+  if(btn){ btn.disabled=false; btn.textContent='🗜️ Mulai Kompres Ulang Semua Foto'; }
+  showSt(`✅ Selesai! ${success} foto berhasil dikompres, ${failed} gagal (dari ${targets.length} total).`, failed>0?'var(--orange)':'var(--green)');
+  showToast(`✅ Kompres foto selesai: ${success} berhasil, ${failed} gagal`, failed>0?'error':'success');
+  if(typeof renderKatalog==='function') renderKatalog();
+}
+
 function debugCariProduk(){
   var q=(document.getElementById('debugSearch')?.value||'').toLowerCase().trim();
   var el=document.getElementById('debugResult');
