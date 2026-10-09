@@ -2596,7 +2596,8 @@ async function uploadFotoToSupabase(fileBlob, filename){
       'apikey':sbKey,
       'Authorization':'Bearer '+(sbAccessToken||sbKey),
       'Content-Type': fileBlob.type||'image/jpeg',
-      'x-upsert':'true'
+      'x-upsert':'true',
+      'cache-control':'max-age=31536000'
     };
     // FIX: Gunakan PUT sebagai metode utama (overwrite deterministik, tidak buat file duplikat)
     let res = await fetch(uploadUrl, {method:'PUT', headers, body:fileBlob});
@@ -4423,7 +4424,7 @@ async function compressAllExistingPhotos(){
       const newBlob=await _resizeBlobToTarget(origBlob, 600, 300*1024);
 
       const uploadUrl=`${sbUrl}/storage/v1/object/mc-photos/${filename}`;
-      const headers={'apikey':sbKey,'Authorization':'Bearer '+(sbAccessToken||sbKey),'Content-Type':'image/jpeg','x-upsert':'true'};
+      const headers={'apikey':sbKey,'Authorization':'Bearer '+(sbAccessToken||sbKey),'Content-Type':'image/jpeg','x-upsert':'true','cache-control':'max-age=31536000'};
       const putRes=await fetch(uploadUrl,{method:'PUT',headers,body:newBlob});
       if(!putRes.ok) throw new Error('Upload ulang gagal ('+putRes.status+')');
 
@@ -5130,7 +5131,7 @@ function filterFotoProduk(){
         display:flex;align-items:center;gap:10px;transition:background 0.1s;
       " onmouseover="this.style.background='var(--bg4)'" onmouseout="this.style.background=''">
         <div style="width:32px;height:32px;border-radius:5px;overflow:hidden;background:var(--bg4);flex-shrink:0;display:flex;align-items:center;justify-content:center;">
-          ${hasImg?`<img src="${esc(p.img)}" style="width:100%;height:100%;object-fit:cover;"/>`:'<span style="font-size:16px;">🛋️</span>'}
+          ${hasImg?`<img src="${esc(p.img)}" loading="lazy" decoding="async" style="width:100%;height:100%;object-fit:cover;"/>`:'<span style="font-size:16px;">🛋️</span>'}
         </div>
         <div style="flex:1;min-width:0;">
           <div style="font-size:12px;font-weight:500;color:var(--t);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(p.name)}</div>
@@ -5575,7 +5576,7 @@ function renderMergeDupList(){
         background:${isMaster?'rgba(201,168,76,0.08)':'var(--bg3)'};
         border:1px solid ${isMaster?'rgba(201,168,76,0.35)':'var(--bd)'};margin-bottom:6px;">
         <div style="width:44px;height:44px;flex-shrink:0;border-radius:6px;overflow:hidden;background:var(--bg4);display:flex;align-items:center;justify-content:center;">
-          ${p.img?`<img src="${esc(p.img)}" style="width:100%;height:100%;object-fit:cover;" onerror="this.parentElement.innerHTML='🛋️'"/>`:'<span style="font-size:20px;">🛋️</span>'}
+          ${p.img?`<img src="${esc(p.img)}" loading="lazy" decoding="async" style="width:100%;height:100%;object-fit:cover;" onerror="this.parentElement.innerHTML='🛋️'"/>`:'<span style="font-size:20px;">🛋️</span>'}
         </div>
         <div style="flex:1;min-width:0;">
           <div style="font-size:12px;font-weight:700;color:${isMaster?'var(--gold)':'var(--t)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
