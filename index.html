@@ -2177,8 +2177,11 @@ async function sbFetchAllProducts(){
   const PAGE_SIZE = 1000;
   let allRows = [];
   let offset  = 0;
+  // Hemat egress: kolom 'embedding' (vektor AI, ~85% dari ukuran data) tidak dipakai katalog, jadi tidak diunduh.
+  // Pengaman: kalau server menolak daftar kolom ini (HTTP 400, mis. skema database berbeda), otomatis kembali ke select=*.
+  let selCols = 'id,name,alias,harga,kategori,keterangan,divisi,img,created_at,updated_at,ukuran,name_key,deleted_at,version,sync_status,warna,material,sku,brand_code,accurate_code';
   while(true){
-    const url = sbUrl+'/rest/v1/mc_products?select=*&order=created_at.desc&limit='+PAGE_SIZE+'&offset='+offset;
+    const url = sbUrl+'/rest/v1/mc_products?select='+selCols+'&order=created_at.desc&limit='+PAGE_SIZE+'&offset='+offset;
     const headers = {
       'apikey': sbKey,
       'Authorization': 'Bearer '+(sbAccessToken||sbKey),
@@ -2186,6 +2189,7 @@ async function sbFetchAllProducts(){
       'Prefer': 'count=none'
     };
     const res = await fetch(url, {method:'GET', headers});
+    if(!res.ok && res.status === 400 && selCols !== '*'){ selCols = '*'; continue; }
     const text = await res.text();
     let page = null;
     try{ page = text ? JSON.parse(text) : []; }catch(e){ page = []; }
@@ -3642,6 +3646,98 @@ function _ownerIdleStop(){
 }
 
 // ============================================================
+// TAMU & SPG IDLE AUTO-LOGOUT — 10 menit tanpa aktivitas → peringatan 30 detik → logout
+// Tujuan: tab yang lupa ditutup tidak tetap login. Login Tamu/SPG hanya ada di memori tab
+// ini sendiri, jadi logout di satu tab tidak mempengaruhi tab lain. Pemilik tidak diubah
+// (punya auto-logout sendiri di atas).
+// ============================================================
+const _GS_IDLE_MS     = 10 * 60 * 1000;   // 10 menit tanpa aktivitas → tampil peringatan
+const _GS_GRACE_MS    = 30 * 1000;        // 30 detik hitung mundur sebelum logout
+const _GS_IDLE_EVENTS = ['mousemove','mousedown','keydown','touchstart','touchmove','scroll','click'];
+let _gsIdleTimer = null, _gsGraceTimer = null, _gsCountdownInt = null, _gsWarnEl = null;
+
+function _gsIsTarget(){ return !!currentUser && (currentUser.role === 'guest' || currentUser.role === 'spg'); }
+
+function _gsClearWarn(){
+  if(_gsWarnEl && _gsWarnEl.parentElement) _gsWarnEl.remove();
+  _gsWarnEl = null;
+  if(_gsGraceTimer)   { clearTimeout(_gsGraceTimer);    _gsGraceTimer = null; }
+  if(_gsCountdownInt) { clearInterval(_gsCountdownInt); _gsCountdownInt = null; }
+}
+
+function _gsIdleReset(){
+  if(!_gsIsTarget()) return;
+  _gsClearWarn();
+  if(_gsIdleTimer) clearTimeout(_gsIdleTimer);
+  _gsIdleTimer = setTimeout(_gsIdleWarn, _GS_IDLE_MS);
+}
+
+function _gsIdleWarn(){
+  if(!_gsIsTarget()) return;
+  _gsClearWarn();
+  const el = document.createElement('div');
+  _gsWarnEl = el;
+  el.id = 'gsIdleWarning';
+  el.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.8);display:flex;align-items:center;justify-content:center;padding:20px;';
+  el.innerHTML =
+    '<div style="background:var(--bg2);border:1px solid var(--bd2);border-radius:16px;padding:28px 24px;width:320px;max-width:95vw;text-align:center;box-shadow:0 24px 80px rgba(0,0,0,0.8);">'
+    + '<div style="font-size:34px;margin-bottom:10px;">⏰</div>'
+    + '<div style="font-family:\'Poppins\',\'Inter\',system-ui,sans-serif;font-size:16px;font-weight:700;color:var(--t);margin-bottom:8px;">Sesi Akan Berakhir</div>'
+    + '<div style="font-size:12px;color:var(--t3);line-height:1.7;">Tidak ada aktivitas selama 10 menit.<br/>Anda akan otomatis keluar dalam <b id="gsIdleNum" style="color:var(--red);">30</b> detik.</div>'
+    + '<div style="display:flex;gap:10px;margin-top:20px;">'
+    + '<button onclick="_gsIdleReset()" style="flex:2;padding:11px;border-radius:9px;border:none;background:linear-gradient(135deg,var(--gold),#b8922e);color:#0a0704;font-size:14px;font-weight:700;cursor:pointer;">Tetap Login</button>'
+    + '<button onclick="_gsIdleDoLogout()" style="flex:1;padding:11px;border-radius:9px;border:1px solid var(--bd2);background:var(--bg3);color:var(--t);font-size:13px;cursor:pointer;">Keluar</button>'
+    + '</div></div>';
+  document.body.appendChild(el);
+
+  let sisa = Math.ceil(_GS_GRACE_MS / 1000);
+  const numEl = document.getElementById('gsIdleNum');
+  _gsCountdownInt = setInterval(()=>{ sisa--; if(numEl) numEl.textContent = Math.max(sisa,0); if(sisa <= 0) _gsIdleDoLogout(); }, 1000);
+  _gsGraceTimer = setTimeout(()=>{ if(_gsIsTarget()) _gsIdleDoLogout(); }, _GS_GRACE_MS + 500);
+}
+
+function _gsIdleDoLogout(){
+  const role = currentUser && currentUser.role;
+  _gsIdleStop();
+  if(role !== 'guest' && role !== 'spg') return;
+  // Tutup semua jendela yang masih terbuka supaya tidak menutupi halaman login
+  document.querySelectorAll('.modal-overlay.open').forEach(m=>m.classList.remove('open'));
+  const zoom = document.getElementById('zoomOverlay'); if(zoom) zoom.classList.remove('open');
+  // Langkah yang sama dengan keluar manual (doLogoutConfirmed), tanpa jendela konfirmasi
+  _appInSession = false;
+  currentUser = null;
+  sbAuthSignOut();
+  document.getElementById('app').classList.remove('visible');
+  document.getElementById('loginPage').classList.remove('hidden');
+  ['loginPassGuest','loginPassSpg','loginPassOwner'].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
+  setLoginTab(role);
+  history.replaceState({app:'login'},'','');
+  _gsShowLogoutNotice();
+}
+
+function _gsShowLogoutNotice(){
+  const old = document.getElementById('gsIdleNotice'); if(old) old.remove();
+  const el = document.createElement('div');
+  el.id = 'gsIdleNotice';
+  el.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:10001;width:calc(100% - 40px);max-width:360px;background:var(--bg2);border:1px solid var(--bd2);border-radius:12px;padding:12px 16px;font-size:12px;color:var(--t);text-align:center;box-shadow:0 8px 30px rgba(0,0,0,0.5);';
+  el.textContent = '⏰ Anda keluar otomatis karena tidak aktif selama 10 menit. Silakan login lagi.';
+  document.body.appendChild(el);
+  setTimeout(()=>{ if(el.parentElement) el.remove(); }, 8000);
+}
+
+function _gsIdleStart(){
+  _gsIdleStop();
+  _GS_IDLE_EVENTS.forEach(ev=>{ document.addEventListener(ev, _gsIdleReset, {passive:true}); });
+  _gsIdleReset();
+}
+
+function _gsIdleStop(){
+  _GS_IDLE_EVENTS.forEach(ev=>{ document.removeEventListener(ev, _gsIdleReset); });
+  if(_gsIdleTimer){ clearTimeout(_gsIdleTimer); _gsIdleTimer = null; }
+  _gsClearWarn();
+}
+
+// ============================================================
 // KONFLIK EDIT FOTO — warning saat 2 owner edit bersamaan
 // ============================================================
 const _EDIT_LOCK_PREFIX = 'mc_editing_';
@@ -3752,6 +3848,7 @@ function showConfirmLogout(){
 }
 function doLogoutConfirmed(){
   document.getElementById('modalLogoutConfirm').style.display='none';
+  _gsIdleStop();
   _appInSession = false;
   currentUser=null;
   sbAuthSignOut(); // hapus token login resmi — sesi berikutnya wajib login ulang
@@ -3847,6 +3944,7 @@ async function startApp(){
   }
 
   const role = currentUser.role;
+  if(role === 'guest' || role === 'spg') _gsIdleStart();   // auto-logout 10 menit tidak aktif
   const roleLabels = {guest:'Tamu', spg:'SPG', owner:'Pemilik'};
   const roleDesc   = {guest:'Pengunjung', spg:'Sales Promotion Girl', owner:'Pemilik / Owner'};
   const roleIcons  = {guest:'👁', spg:'💼', owner:'👑'};
@@ -7759,7 +7857,7 @@ updateOnlineStatus();
   document.addEventListener('visibilitychange', async ()=>{
     if(document.visibilityState === 'visible'){
       const idleDuration = Date.now() - _lastActive;
-      if(idleDuration > STALE_MS && sbMode === 'online'){
+      if(idleDuration > STALE_MS && sbMode === 'online' && currentUser){
         // console.log('Auto-refresh: tab aktif kembali setelah '+(Math.round(idleDuration/1000))+'s — sync data dari Supabase');
         try{
           // Silent refresh — tidak tampilkan loading agar tidak ganggu
