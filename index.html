@@ -7918,6 +7918,7 @@ function fotoCepatFilter(){ fotoCepatRender(); }
 
 function fotoCepatRender(){
   const grid=document.getElementById('fotoCepatGrid'); if(!grid) return;
+  if(grid.offsetParent===null) return; // halaman Upload Foto Cepat sedang tersembunyi: jangan render (hemat egress foto)
   const q=(document.getElementById('fotoCepatSearch')?.value||'').toLowerCase().trim();
   let list=products.filter(p=>{
     if(q && !p.name.toLowerCase().includes(q) && !(p.alias||'').toLowerCase().includes(q)) return false;
@@ -7961,7 +7962,7 @@ function fotoCepatRender(){
     imgWrap.style.cssText='width:100%;aspect-ratio:1;background:var(--bg3);overflow:hidden;display:flex;align-items:center;justify-content:center;position:relative;';
     if(hasImg){
       const im=document.createElement('img');
-      im.src=p.img; im.loading='lazy';
+      im.loading='lazy'; im.decoding='async'; im.src=p.img; // lazy HARUS diset sebelum src, kalau tidak foto langsung diunduh semua
       im.style.cssText='width:100%;height:100%;object-fit:cover;display:block;';
       const fallback=document.createElement('div');
       fallback.style.cssText='display:none;position:absolute;inset:0;align-items:center;justify-content:center;font-size:36px;color:var(--t4);';
