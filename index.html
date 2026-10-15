@@ -3651,7 +3651,10 @@ function _ownerIdleStop(){
 // ini sendiri, jadi logout di satu tab tidak mempengaruhi tab lain. Pemilik tidak diubah
 // (punya auto-logout sendiri di atas).
 // ============================================================
-const _GS_IDLE_MS     = 10 * 60 * 1000;   // 10 menit tanpa aktivitas → tampil peringatan
+const _GS_IDLE_MS     = 5 * 60 * 1000;    // 5 menit tanpa aktivitas (sebelumnya 10 menit)
+// [v8] Mode senyap: true = setelah idle langsung logout TANPA peringatan & TANPA pemberitahuan apa pun.
+// Set false untuk kembali ke perilaku lama (peringatan 30 detik + pemberitahuan setelah logout).
+const _GS_SILENT      = true;
 const _GS_GRACE_MS    = 30 * 1000;        // 30 detik hitung mundur sebelum logout
 const _GS_IDLE_EVENTS = ['mousemove','mousedown','keydown','touchstart','touchmove','scroll','click'];
 let _gsIdleTimer = null, _gsGraceTimer = null, _gsCountdownInt = null, _gsWarnEl = null;
@@ -3674,6 +3677,7 @@ function _gsIdleReset(){
 
 function _gsIdleWarn(){
   if(!_gsIsTarget()) return;
+  if(_GS_SILENT){ _gsIdleDoLogout(); return; }   // [v8] langsung keluar, tanpa jendela peringatan
   _gsClearWarn();
   const el = document.createElement('div');
   _gsWarnEl = el;
@@ -3683,7 +3687,7 @@ function _gsIdleWarn(){
     '<div style="background:var(--bg2);border:1px solid var(--bd2);border-radius:16px;padding:28px 24px;width:320px;max-width:95vw;text-align:center;box-shadow:0 24px 80px rgba(0,0,0,0.8);">'
     + '<div style="font-size:34px;margin-bottom:10px;">⏰</div>'
     + '<div style="font-family:\'Poppins\',\'Inter\',system-ui,sans-serif;font-size:16px;font-weight:700;color:var(--t);margin-bottom:8px;">Sesi Akan Berakhir</div>'
-    + '<div style="font-size:12px;color:var(--t3);line-height:1.7;">Tidak ada aktivitas selama 10 menit.<br/>Anda akan otomatis keluar dalam <b id="gsIdleNum" style="color:var(--red);">30</b> detik.</div>'
+    + '<div style="font-size:12px;color:var(--t3);line-height:1.7;">Tidak ada aktivitas selama '+Math.round(_GS_IDLE_MS/60000)+' menit.<br/>Anda akan otomatis keluar dalam <b id="gsIdleNum" style="color:var(--red);">30</b> detik.</div>'
     + '<div style="display:flex;gap:10px;margin-top:20px;">'
     + '<button onclick="_gsIdleReset()" style="flex:2;padding:11px;border-radius:9px;border:none;background:linear-gradient(135deg,var(--gold),#b8922e);color:#0a0704;font-size:14px;font-weight:700;cursor:pointer;">Tetap Login</button>'
     + '<button onclick="_gsIdleDoLogout()" style="flex:1;padding:11px;border-radius:9px;border:1px solid var(--bd2);background:var(--bg3);color:var(--t);font-size:13px;cursor:pointer;">Keluar</button>'
@@ -3716,11 +3720,12 @@ function _gsIdleDoLogout(){
 }
 
 function _gsShowLogoutNotice(){
+  if(_GS_SILENT) return;   // [v8] tanpa pemberitahuan apa pun
   const old = document.getElementById('gsIdleNotice'); if(old) old.remove();
   const el = document.createElement('div');
   el.id = 'gsIdleNotice';
   el.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:10001;width:calc(100% - 40px);max-width:360px;background:var(--bg2);border:1px solid var(--bd2);border-radius:12px;padding:12px 16px;font-size:12px;color:var(--t);text-align:center;box-shadow:0 8px 30px rgba(0,0,0,0.5);';
-  el.textContent = '⏰ Anda keluar otomatis karena tidak aktif selama 10 menit. Silakan login lagi.';
+  el.textContent = '⏰ Anda keluar otomatis karena tidak aktif selama '+Math.round(_GS_IDLE_MS/60000)+' menit. Silakan login lagi.';
   document.body.appendChild(el);
   setTimeout(()=>{ if(el.parentElement) el.remove(); }, 8000);
 }
@@ -3944,7 +3949,7 @@ async function startApp(){
   }
 
   const role = currentUser.role;
-  if(role === 'guest' || role === 'spg') _gsIdleStart();   // auto-logout 10 menit tidak aktif
+  if(role === 'guest' || role === 'spg') _gsIdleStart();   // auto-logout saat tidak aktif (lihat _GS_IDLE_MS)
   const roleLabels = {guest:'Tamu', spg:'SPG', owner:'Pemilik'};
   const roleDesc   = {guest:'Pengunjung', spg:'Sales Promotion Girl', owner:'Pemilik / Owner'};
   const roleIcons  = {guest:'👁', spg:'💼', owner:'👑'};
@@ -7860,6 +7865,13 @@ updateOnlineStatus();
       if(idleDuration > STALE_MS && sbMode === 'online' && currentUser){
         // console.log('Auto-refresh: tab aktif kembali setelah '+(Math.round(idleDuration/1000))+'s — sync data dari Supabase');
         try{
+          // [v8] Sinkron bertahap (hemat egress): hanya ambil produk yang berubah. Jika tidak bisa / gagal /
+          // dimatikan, mcDeltaSync() mengembalikan false dan kode lama di bawah (unduh penuh) tetap berjalan.
+          if(typeof window.mcDeltaSync === 'function'){
+            let _handled = false;
+            try{ _handled = await window.mcDeltaSync(); }catch(_e){ _handled = false; }
+            if(_handled){ _lastActive = Date.now(); return; }
+          }
           // Silent refresh — tidak tampilkan loading agar tidak ganggu
           const prods = await sbFetchAllProducts(); // paginasi otomatis — ambil SEMUA produk
           if(prods && Array.isArray(prods) && prods.length > 0){
@@ -8795,6 +8807,215 @@ async function msDoShare(){
   window.open('https://wa.me/?text='+encodeURIComponent(msg),'_blank');
   toggleMultiShare();
 }
+</script>
+
+<script>
+// ============================================================================
+// [v8] TAMBAHAN — tidak mengubah kode di atas. Tiap fitur punya saklar di MC_V8.
+// Cara mematikan: ubah true → false. Menghapus seluruh blok <script> ini = kembali ke perilaku v7.
+//   deltaSync      : saat kembali ke app, ambil hanya produk yang berubah (bukan seluruh katalog)
+//   idleCheck      : Tamu/SPG yang tidak aktif ≥ 5 menit langsung logout, juga saat app di latar belakang
+//   singleInstance : 1 perangkat/browser hanya boleh membuka app ini di 1 tab/jendela
+// ============================================================================
+(function(){
+'use strict';
+const MC_V8 = { deltaSync:true, idleCheck:true, singleInstance:true };
+
+// ───────────────────────── 1) SINKRON BERTAHAP ─────────────────────────
+const DELTA_OVERLAP_MS = 10*60*1000;  // ambil ulang 10 menit ke belakang (toleransi jam perangkat yang tidak sama)
+const FULL_RESYNC_MS   = 60*60*1000;  // paksa unduh penuh bila baseline > 60 menit
+const DELTA_MAX_ROWS   = 300;         // perubahan lebih banyak dari ini → unduh penuh saja (mis. habis import Excel)
+const DELTA_MAX_ADD    = 100;
+const DELTA_MAX_DEL    = 50;
+const COLS = 'id,name,alias,harga,kategori,keterangan,divisi,img,created_at,updated_at,ukuran,name_key,deleted_at,version,sync_status,warna,material,sku,brand_code,accurate_code';
+
+let _fullAt = 0;   // waktu MULAI unduh penuh terakhir yang berhasil
+let _mark   = 0;   // waktu MULAI sinkron terakhir yang berhasil (penuh/bertahap)
+
+// Catat baseline setiap kali katalog diunduh penuh (login, tombol refresh, Foto Cepat, cadangan).
+if(typeof window.sbFetchAllProducts === 'function'){
+  const _origFetchAll = window.sbFetchAllProducts;
+  window.sbFetchAllProducts = async function(){
+    const t0 = Date.now();
+    const rows = await _origFetchAll.apply(this, arguments);   // error tetap dilempar seperti biasa
+    _fullAt = t0; _mark = t0;
+    return rows;
+  };
+}
+
+const hdrs = (extra)=>Object.assign({'apikey':sbKey,'Authorization':'Bearer '+(sbAccessToken||sbKey),'Content-Type':'application/json'}, extra||{});
+const inList = (ids)=>'in.('+ids.map(i=>'"'+String(i).replace(/"/g,'')+'"').join(',')+')';
+
+// Pemetaan baris → produk: SAMA dengan yang dipakai handler "kembali ke app" di v7.
+function mapRow(r, local){
+  const sbDivisi  = r.divisi && Object.keys(r.divisi).length>0 ? r.divisi : null;
+  const rawDivisi = sbDivisi || (local && local.divisi) || {};
+  const divisi = {
+    Global:rawDivisi.Global??0, Central:rawDivisi.Central??0, Celine:rawDivisi.Celine??0,
+    Panda:rawDivisi.Panda??0, Titipan:rawDivisi.Titipan??0, Servicean:rawDivisi.Servicean??0
+  };
+  const rawKat = r.kategori||'';
+  const safeKat = (rawKat && rawKat.length>1 && !/^\d+$/.test(rawKat) && rawKat.toLowerCase()!=='kategori') ? rawKat : ((local&&local.kategori)||'');
+  return {id:r.id,name:r.name,alias:r.alias||'',harga:r.harga||0,
+    kategori:safeKat,ukuran:r.ukuran||'',keterangan:r.keterangan||'',
+    divisi,img:r.img||'',sku:r.sku||'',accurateCode:r.accurate_code||'',createdAt:r.created_at,updatedAt:r.updated_at};
+}
+// Urutan sama dengan server (created_at menurun; null di depan)
+function insertSorted(arr,item){
+  const c = item.createdAt;
+  if(!c){ arr.unshift(item); return; }
+  let i=0; while(i<arr.length && (!arr[i].createdAt || arr[i].createdAt>=c)) i++;
+  arr.splice(i,0,item);
+}
+async function getJson(url, extra){
+  const res = await fetch(url,{method:'GET',headers:hdrs(extra)});
+  if(!res.ok) throw new Error('HTTP '+res.status);
+  const j = await res.json();
+  if(!Array.isArray(j)) throw new Error('respons bukan array');
+  return j;
+}
+async function serverCount(){
+  const res = await fetch(sbUrl+'/rest/v1/mc_products?select=id',{method:'HEAD',headers:hdrs({'Prefer':'count=exact'})});
+  if(!res.ok) return null;
+  const m = /\/(\d+)$/.exec(res.headers.get('content-range')||'');
+  return m ? parseInt(m[1],10) : null;
+}
+async function fetchAllIds(){
+  const out=[], PAGE=1000;
+  for(let off=0; off<50000; off+=PAGE){
+    const page = await getJson(sbUrl+'/rest/v1/mc_products?select=id&order=id&limit='+PAGE+'&offset='+off);
+    for(const r of page) out.push(r.id);
+    if(page.length<PAGE) break;
+  }
+  return out;
+}
+
+// Mengembalikan true = sudah ditangani. false = biarkan kode lama (unduh penuh) yang bekerja.
+window.mcDeltaSync = async function(){
+  if(!MC_V8.deltaSync) return false;
+  if(sbMode!=='online' || !currentUser) return false;
+  if(typeof _importLock!=='undefined' && _importLock) return false;
+  if(!Array.isArray(products) || products.length===0) return false;
+  if(!_fullAt || !_mark) return false;                       // belum ada baseline
+  const t0 = Date.now();
+  if(t0 - _fullAt > FULL_RESYNC_MS) return false;            // saatnya unduh penuh
+
+  // 1) baris yang berubah sejak sinkron terakhir
+  const since = new Date(_mark - DELTA_OVERLAP_MS).toISOString();
+  const changed = await getJson(sbUrl+'/rest/v1/mc_products?select='+COLS+'&updated_at=gt.'+encodeURIComponent(since)+'&order=created_at.desc&limit='+DELTA_MAX_ROWS);
+  if(changed.length >= DELTA_MAX_ROWS) return false;
+
+  // 2) deteksi barang dihapus / barang baru yang tidak tertangkap filter waktu
+  const localIds = new Set(products.map(p=>p.id));
+  const newInChanged = changed.filter(r=>!localIds.has(r.id)).length;
+  const expected = products.length + newInChanged;
+  let srvCount = null;
+  try{ srvCount = await serverCount(); }catch(_){ srvCount = null; }
+  let extraRows = [], gone = new Set();
+  if(srvCount === null || srvCount !== expected){
+    const ids = await fetchAllIds();
+    if(ids.length===0) return false;                                       // jangan pernah mengosongkan katalog
+    if(srvCount!==null && Math.abs(ids.length-srvCount)>5) return false;   // paginasi tidak stabil
+    const serverSet = new Set(ids);
+    const known = new Set(localIds); changed.forEach(r=>known.add(r.id));
+    const missingLocal = ids.filter(id=>!known.has(id));
+    const goneCand = [...known].filter(id=>!serverSet.has(id));
+    if(missingLocal.length>DELTA_MAX_ADD || goneCand.length>DELTA_MAX_DEL) return false;
+    if(goneCand.length){                                                   // verifikasi ulang sebelum menghapus dari tampilan
+      const still = await getJson(sbUrl+'/rest/v1/mc_products?select=id&id='+encodeURIComponent(inList(goneCand)));
+      const stillSet = new Set(still.map(r=>r.id));
+      goneCand.forEach(id=>{ if(!stillSet.has(id)) gone.add(id); });
+    }
+    for(let i=0;i<missingLocal.length;i+=100){
+      const part = missingLocal.slice(i,i+100);
+      extraRows = extraRows.concat(await getJson(sbUrl+'/rest/v1/mc_products?select='+COLS+'&id='+encodeURIComponent(inList(part))));
+    }
+  }
+
+  // 3) terapkan (sinkron, tanpa await — tidak ada keadaan setengah jadi)
+  let touched = false;
+  const next = products.filter(p=>{ if(gone.has(p.id)){ touched=true; return false; } return true; });
+  const idxById = new Map(next.map((p,i)=>[p.id,i]));
+  changed.concat(extraRows).forEach(r=>{
+    const i = idxById.get(r.id);
+    if(i!==undefined){
+      const local = next[i];
+      if(local.updatedAt && r.updated_at && local.updatedAt > r.updated_at) return;   // edit lokal lebih baru → jangan ditimpa
+      const m = mapRow(r, local);
+      if(JSON.stringify(m)!==JSON.stringify(local)){ next[i]=m; touched=true; }
+    } else {
+      insertSorted(next, mapRow(r, null)); touched=true;
+      idxById.clear(); next.forEach((p,k)=>idxById.set(p.id,k));
+    }
+  });
+  products = next;
+  _mark = t0;
+  if(touched && typeof renderKatalog==='function' && currentUser) renderKatalog();
+  if(typeof showToast==='function') showToast('🔄 Data diperbarui otomatis dari server','info');   // sama seperti v7
+  return true;
+};
+
+// ───────────────────── 2) IDLE TAMU/SPG SAAT DI LATAR BELAKANG ─────────────────────
+// Timer biasa bisa dibekukan browser HP saat app tidak terlihat. Pemeriksaan berbasis jam ini menjamin
+// logout tetap terjadi (tanpa pemberitahuan) begitu app dibuka kembali setelah ≥ 5 menit.
+if(MC_V8.idleCheck && typeof _gsIdleDoLogout==='function'){
+  let lastAct = Date.now(), lastReset = 0;
+  const bump = ()=>{
+    const n = Date.now(); lastAct = n;
+    // Samakan dengan timer v7: scroll di dalam kontainer & roda mouse tidak lagi dianggap "diam".
+    if(n-lastReset>1000){ lastReset=n; if(typeof _gsIsTarget==='function' && _gsIsTarget() && typeof _gsIdleReset==='function') _gsIdleReset(); }
+  };
+  ['mousemove','mousedown','keydown','touchstart','touchmove','scroll','click','wheel']
+    .forEach(ev=>window.addEventListener(ev,bump,{passive:true,capture:true}));
+  const check = ()=>{
+    if(typeof _gsIsTarget!=='function' || !_gsIsTarget()) return;
+    if(Date.now()-lastAct > _GS_IDLE_MS) _gsIdleDoLogout();
+  };
+  // capture di window → jalan SEBELUM handler sinkron data, sehingga tidak ada unduhan sia-sia
+  window.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible') check(); }, true);
+  window.addEventListener('focus', check);
+  window.addEventListener('pageshow', check);
+  setInterval(check, 15000);
+}
+
+// ───────────────────── 3) 1 PERANGKAT = 1 TAB/JENDELA ─────────────────────
+// Memakai Web Locks API: kunci dilepas otomatis oleh browser saat tab ditutup / crash / di-discard,
+// jadi tidak perlu heartbeat dan tidak ada risiko "terkunci selamanya".
+if(MC_V8.singleInstance && window.isSecureContext && navigator.locks && typeof navigator.locks.request==='function'){
+  const LOCK_NAME = 'mc_single_instance_v1';
+  let blockEl = null, showTimer = null;
+  const setInert = (on)=>['app','loginPage'].forEach(id=>{
+    const el=document.getElementById(id); if(!el) return;
+    if(on) el.setAttribute('inert',''); else el.removeAttribute('inert');
+  });
+  const show = ()=>{
+    if(blockEl) return;
+    blockEl = document.createElement('div');
+    blockEl.id = 'mcSingleInstance';
+    blockEl.style.cssText = 'position:fixed;inset:0;z-index:2147483000;background:var(--bg,#0a0704);display:flex;align-items:center;justify-content:center;padding:24px;';
+    blockEl.innerHTML =
+      '<div style="background:var(--bg2,#1a1206);border:1px solid var(--bd2,#3a2c10);border-radius:16px;padding:28px 24px;width:340px;max-width:100%;text-align:center;color:var(--t,#f3e9d2);font-family:inherit;box-shadow:0 24px 80px rgba(0,0,0,.8);">'
+      + '<div style="font-size:38px;margin-bottom:10px;">🔒</div>'
+      + '<div style="font-size:16px;font-weight:700;margin-bottom:8px;">Aplikasi sudah terbuka</div>'
+      + '<div style="font-size:12px;line-height:1.7;color:var(--t3,#a99f88);">Aplikasi ini sudah dibuka di tab atau jendela lain pada perangkat ini.<br/>Tutup yang lain, halaman ini akan terbuka otomatis.</div>'
+      + '<button onclick="location.reload()" style="margin-top:18px;width:100%;padding:11px;border-radius:9px;border:1px solid var(--bd2,#3a2c10);background:var(--bg3,#241a09);color:var(--t,#f3e9d2);font-size:13px;cursor:pointer;font-family:inherit;">Muat Ulang</button>'
+      + '</div>';
+    document.body.appendChild(blockEl);
+    setInert(true);
+  };
+  const hide = ()=>{
+    if(showTimer){ clearTimeout(showTimer); showTimer=null; }
+    if(blockEl && blockEl.parentElement) blockEl.remove();
+    blockEl = null; setInert(false);
+  };
+  navigator.locks.request(LOCK_NAME,{ifAvailable:true}, (lock)=>{
+    if(lock) return new Promise(()=>{});          // tab ini yang pertama: pegang kunci sampai ditutup
+    // ada tab lain: tampilkan blokir (ditunda sebentar agar reload cepat tidak berkedip), lalu antre
+    showTimer = setTimeout(show, 1500);
+    navigator.locks.request(LOCK_NAME, ()=>{ hide(); return new Promise(()=>{}); }).catch(()=>{});
+  }).catch(()=>{});
+}
+})();
 </script>
 
 </body>
