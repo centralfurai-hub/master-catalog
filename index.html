@@ -1270,9 +1270,6 @@ CREATE POLICY "mc_photos_update" ON storage.objects
     </div>
     <div id="loginErrGuest" style="display:none;background:rgba(224,85,85,0.10);border:1px solid rgba(224,85,85,0.4);border-radius:6px;padding:8px 12px;font-size:12px;color:var(--red);margin-bottom:10px;text-align:center;line-height:1.5;"></div>
     <button class="btn-login" onclick="doGuestLogin()">👁 Masuk Sebagai Tamu</button>
-    <div style="text-align:center;margin-top:10px;">
-      <span onclick="openGuestPwReset()" style="font-size:11px;color:var(--t4);cursor:pointer;text-decoration:underline;">Lupa / Ubah Password?</span>
-    </div>
   </div>
 
   <!-- SPG FORM -->
@@ -1292,9 +1289,6 @@ CREATE POLICY "mc_photos_update" ON storage.objects
     </div>
     <div id="loginErrSpg" style="display:none;background:rgba(224,85,85,0.10);border:1px solid rgba(224,85,85,0.4);border-radius:6px;padding:8px 12px;font-size:12px;color:var(--red);margin-bottom:10px;text-align:center;line-height:1.5;"></div>
     <button class="btn-login" onclick="doSpgLogin()">💼 Masuk sebagai SPG</button>
-    <div style="text-align:center;margin-top:10px;">
-      <span onclick="openSpgPwReset()" style="font-size:11px;color:var(--t4);cursor:pointer;text-decoration:underline;">Lupa / Ubah Password?</span>
-    </div>
   </div>
 
   <!-- OWNER FORM -->
@@ -1352,6 +1346,9 @@ CREATE POLICY "mc_photos_update" ON storage.objects
       <div class="nav-sep"></div>
       <div class="nav-item" onclick="showPage('backup')" data-page="backup" id="navBackup">
         <span class="ico">💾</span> Backup Data
+      </div>
+      <div class="nav-item" onclick="openManagePw()" id="navManagePw" style="display:none;">
+        <span class="ico">🔑</span> Ganti Password
       </div>
     </div>
     <div class="sidebar-bottom">
@@ -2851,7 +2848,8 @@ const RBAC_PERMS = {
     addProduk:true, editProduk:true, deleteProduk:true, uploadFoto:true,
     importExcel:true, backupData:true, restoreData:true, ubahHarga:true,
     ubahStok:true, adminMenu:true, kelolaKat:true, exportPDF:true,
-    downloadFoto:true
+    downloadFoto:true,
+    managePassword:true
   }
 };
 
@@ -3083,7 +3081,7 @@ async function doGuestLogin(){
   const p = document.getElementById('loginPassGuest').value.trim();
   if(!p){ _showLoginErr('guest','⚠️ Masukkan password tamu terlebih dahulu.',false); document.getElementById('loginPassGuest').focus(); return; }
   if(!_checkLoginLock('guest')) return;
-  if(await _checkPw('guest', p)){
+  if(await _guestPwOk(p)){
     _resetLoginAttempts('guest');
     currentUser={role:'guest', name:'Tamu'};
     _appInSession=true;
@@ -3973,6 +3971,8 @@ async function startApp(){
   // Sidebar items
   const navBackup = document.getElementById('navBackup');
   if(navBackup) navBackup.style.display = can('backupData') ? '' : 'none';
+  const navManagePw = document.getElementById('navManagePw');
+  if(navManagePw) navManagePw.style.display = can('managePassword') ? '' : 'none';
 
   // Tombol di topbar katalog
   const btnTambah = document.getElementById('btnTambahProduk');
@@ -8469,6 +8469,53 @@ function exportStokHabisPDF(){
   </div>
 </div>
 
+<!-- ══════ MODAL GANTI PASSWORD SPG / TAMU (khusus Pemilik) ══════ -->
+<div id="modalManagePw" style="display:none;position:fixed;inset:0;z-index:100000;pointer-events:auto;background:rgba(0,0,0,0.75);align-items:center;justify-content:center;padding:16px;">
+  <div style="background:var(--bg2);border:1px solid var(--bd2);border-radius:16px;width:100%;max-width:380px;padding:28px 24px;box-shadow:0 20px 60px rgba(0,0,0,0.8);">
+    <div style="font-size:22px;text-align:center;margin-bottom:4px;">🔑</div>
+    <div style="font-size:15px;font-weight:700;color:var(--t);text-align:center;margin-bottom:4px;">Ganti Password SPG / Tamu</div>
+    <div style="font-size:11px;color:var(--t3);text-align:center;margin-bottom:18px;line-height:1.6;">Password diubah langsung di server dan berlaku di semua perangkat.<br/>SPG yang sedang login akan keluar dan perlu masuk lagi.</div>
+    <div style="margin-bottom:10px;">
+      <label style="font-size:11px;color:var(--t3);display:block;margin-bottom:5px;">Akun yang diubah</label>
+      <select id="mpRole" style="width:100%;background:var(--bg3);border:1px solid var(--bd2);border-radius:var(--rs);padding:10px 13px;font-size:13px;color:var(--t);outline:none;">
+        <option value="spg">SPG</option>
+        <option value="guest">Tamu</option>
+      </select>
+    </div>
+    <div style="margin-bottom:10px;">
+      <label style="font-size:11px;color:var(--t3);display:block;margin-bottom:5px;">Password baru</label>
+      <div style="position:relative;">
+        <input type="password" id="mpNew1" placeholder="Minimal 6 karakter" autocomplete="new-password"
+          style="width:100%;background:var(--bg3);border:1px solid var(--bd2);border-radius:var(--rs);padding:10px 38px 10px 13px;font-size:13px;color:var(--t);outline:none;"/>
+        <span onclick="togglePw('mpNew1',this)" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);cursor:pointer;font-size:14px;color:var(--t3);">👁</span>
+      </div>
+    </div>
+    <div style="margin-bottom:10px;">
+      <label style="font-size:11px;color:var(--t3);display:block;margin-bottom:5px;">Konfirmasi password baru</label>
+      <div style="position:relative;">
+        <input type="password" id="mpNew2" placeholder="Ulangi password baru" autocomplete="new-password"
+          style="width:100%;background:var(--bg3);border:1px solid var(--bd2);border-radius:var(--rs);padding:10px 38px 10px 13px;font-size:13px;color:var(--t);outline:none;"/>
+        <span onclick="togglePw('mpNew2',this)" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);cursor:pointer;font-size:14px;color:var(--t3);">👁</span>
+      </div>
+    </div>
+    <div style="margin-bottom:10px;">
+      <label style="font-size:11px;color:var(--t3);display:block;margin-bottom:5px;">Password Pemilik (verifikasi)</label>
+      <div style="position:relative;">
+        <input type="password" id="mpOwnerPw" placeholder="Password Pemilik Anda" autocomplete="current-password"
+          style="width:100%;background:var(--bg3);border:1px solid var(--bd2);border-radius:var(--rs);padding:10px 38px 10px 13px;font-size:13px;color:var(--t);outline:none;"/>
+        <span onclick="togglePw('mpOwnerPw',this)" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);cursor:pointer;font-size:14px;color:var(--t3);">👁</span>
+      </div>
+    </div>
+    <div id="mpStatus" style="display:none;font-size:11px;border-radius:6px;padding:8px 12px;margin-bottom:10px;line-height:1.5;"></div>
+    <div style="display:flex;gap:8px;margin-top:6px;">
+      <button onclick="document.getElementById('modalManagePw').style.display='none'"
+        style="flex:1;padding:10px;border-radius:var(--rs);background:var(--bg3);border:1px solid var(--bd2);color:var(--t3);font-size:13px;cursor:pointer;">Batal</button>
+      <button id="btnSaveManagePw" onclick="saveManagePw()"
+        style="flex:2;padding:10px;border-radius:var(--rs);background:linear-gradient(135deg,var(--gold),var(--gold2));color:#0a0704;font-size:13px;font-weight:700;border:none;cursor:pointer;">💾 Simpan Password</button>
+    </div>
+  </div>
+</div>
+
 <!-- ══════ MODAL RESET PASSWORD PEMILIK ══════ -->
 <div id="modalOwnerPwReset" style="display:none;position:fixed;inset:0;z-index:100000;pointer-events:auto;background:rgba(0,0,0,0.75);align-items:center;justify-content:center;padding:16px;">
   <div style="background:var(--bg2);border:1px solid var(--bd2);border-radius:16px;width:100%;max-width:380px;padding:28px 24px;box-shadow:0 20px 60px rgba(0,0,0,0.8);">
@@ -8538,6 +8585,89 @@ function openOwnerPwReset(){
   document.getElementById('btnSendOwnerPw').textContent='👑 Simpan & Kirim Notifikasi';
   document.getElementById('modalOwnerPwReset').style.display='flex';
   setTimeout(()=>document.getElementById('ownerOldPw').focus(),80);
+}
+
+// ── GANTI PASSWORD SPG / TAMU (khusus Pemilik) — lewat fungsi database Supabase ──
+async function _sbRpc(fn, args, token, timeoutMs){
+  const ctl = new AbortController();
+  const tm = setTimeout(()=>ctl.abort(), timeoutMs||10000);
+  try{
+    const res = await fetch(`${sbUrl}/rest/v1/rpc/${fn}`, {
+      method:'POST',
+      headers:{'apikey':sbKey,'Authorization':'Bearer '+(token||sbKey),'Content-Type':'application/json'},
+      body: JSON.stringify(args),
+      signal: ctl.signal
+    });
+    let data=null; try{ data = await res.json(); }catch(e){}
+    if(!res.ok){
+      const err = new Error((data&&(data.message||data.msg))||('HTTP '+res.status));
+      err.status = res.status; err.code = data&&data.code;
+      throw err;
+    }
+    return data;
+  } finally { clearTimeout(tm); }
+}
+function openManagePw(){
+  if(!can('managePassword')) return;
+  ['mpNew1','mpNew2','mpOwnerPw'].forEach(id=>{ const el=document.getElementById(id); if(el){ el.value=''; el.type='password'; } });
+  const st=document.getElementById('mpStatus'); st.style.display='none'; st.textContent='';
+  const btn=document.getElementById('btnSaveManagePw'); btn.disabled=false; btn.textContent='💾 Simpan Password';
+  document.getElementById('modalManagePw').style.display='flex';
+}
+async function saveManagePw(){
+  if(!can('managePassword')) return;
+  const role = document.getElementById('mpRole').value;
+  const pw1  = document.getElementById('mpNew1').value.trim();
+  const pw2  = document.getElementById('mpNew2').value.trim();
+  const own  = document.getElementById('mpOwnerPw').value.trim();
+  const st   = document.getElementById('mpStatus');
+  const show = (msg,ok)=>{
+    st.style.display='block';
+    st.style.background = ok?'rgba(76,175,80,0.12)':'rgba(239,68,68,0.12)';
+    st.style.color      = ok?'var(--green)':'var(--red)';
+    st.style.border     = ok?'1px solid rgba(76,175,80,0.3)':'1px solid rgba(239,68,68,0.3)';
+    st.textContent      = msg;
+  };
+  if(pw1.length < 6){ show('❌ Password baru minimal 6 karakter',false); return; }
+  if(pw1 !== pw2)   { show('❌ Konfirmasi password tidak cocok',false); return; }
+  if(!own)          { show('❌ Masukkan password Pemilik untuk verifikasi',false); return; }
+
+  const btn=document.getElementById('btnSaveManagePw');
+  btn.disabled=true; btn.textContent='⏳ Menyimpan...';
+  try{
+    // verifikasi password Pemilik ke server (sekaligus menyegarkan sesi)
+    try{ await sbAuthSignIn(AUTH_EMAIL_OWNER, own); }
+    catch(e){ show('❌ Password Pemilik salah.',false); btn.disabled=false; btn.textContent='💾 Simpan Password'; document.getElementById('mpOwnerPw').focus(); return; }
+
+    if(role==='spg'){
+      await _sbRpc('owner_set_spg_password', {p_new:pw1}, sbAccessToken);
+    } else {
+      await _sbRpc('owner_set_guest_password', {p_hash: await _hashPw(pw1)}, sbAccessToken);
+      try{ await _savePw('guest', pw1); }catch(e){}   // samakan juga cadangan lokal di perangkat ini
+    }
+    show('✅ Password '+(role==='spg'?'SPG':'Tamu')+' berhasil diubah di server.',true);
+    btn.textContent='✅ Berhasil';
+    setTimeout(()=>{ document.getElementById('modalManagePw').style.display='none'; },2200);
+  }catch(err){
+    console.error('Gagal mengubah password:',err);
+    let msg = err.message;
+    if(err.status===404 || err.code==='PGRST202') msg = 'Fungsi database belum terpasang. Jalankan file password_owner_spg_tamu.sql di Supabase (SQL Editor) lalu coba lagi.';
+    else if(err.status===401 || err.code==='42501' || err.status===403) msg = 'Tidak punya izin atau sesi habis. Login ulang sebagai Pemilik lalu coba lagi.';
+    show('❌ '+msg,false);
+    btn.disabled=false; btn.textContent='💾 Simpan Password';
+  }
+}
+// Cek password Tamu: utamakan server (berlaku semua perangkat); jika server belum diatur / tidak terjangkau,
+// pakai cek lokal seperti sebelumnya.
+async function _guestPwOk(p){
+  try{
+    if(sbUrl && sbKey){
+      const r = await _sbRpc('check_guest_password', {p_hash: await _hashPw(p)}, null, 4000);
+      if(r===true)  return true;
+      if(r===false) return false;
+    }
+  }catch(e){ /* fungsi belum ada / offline → cek lokal */ }
+  return _checkPw('guest', p);
 }
 
 async function sendOwnerPwReset(){
