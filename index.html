@@ -2080,6 +2080,7 @@ CREATE POLICY "mc_photos_update" ON storage.objects
       Bagikan WA
     </button>
     <button class="btn btn-primary" id="dBtnEdit" onclick="" style="display:none;flex:1;">✏️ Edit</button>
+    <button class="btn" id="dBtnDownload" onclick="downloadDetailFoto()" style="display:none;flex:1;">⬇️ Unduh Foto</button>
 
   </div>
 
@@ -2846,7 +2847,8 @@ const RBAC_PERMS = {
     viewHarga:true, shareWA:true,
     addProduk:true, editProduk:true, deleteProduk:true, uploadFoto:true,
     importExcel:true, backupData:true, restoreData:true, ubahHarga:true,
-    ubahStok:true, adminMenu:true, kelolaKat:true, exportPDF:true
+    ubahStok:true, adminMenu:true, kelolaKat:true, exportPDF:true,
+    downloadFoto:true
   }
 };
 
@@ -5883,6 +5885,10 @@ function openDetail(id){
   // Tombol WA — tampil untuk SPG dan Pemilik
   if(btnShare) btnShare.style.display='flex'; // semua role bisa share
 
+  // Tombol Unduh Foto — hanya Pemilik, dan hanya jika produk punya foto
+  const btnDl=document.getElementById('dBtnDownload');
+  if(btnDl) btnDl.style.display=(can('downloadFoto')&&p.img)?'flex':'none';
+
   // Tombol Edit — hanya Pemilik
   if(isAdmin){
     if(btnEdit){btnEdit.style.display='flex';btnEdit.onclick=()=>{closeModal('modalDetail');openEditProduct(id);};}
@@ -5891,6 +5897,29 @@ function openDetail(id){
   }
 
   openModal('modalDetail');
+}
+// ── UNDUH FOTO (khusus Pemilik) — simpan langsung ke perangkat, tanpa lewat WhatsApp ──
+async function downloadDetailFoto(){
+  if(!can('downloadFoto')) return;
+  const p=_currentDetailProduct;
+  if(!p||!p.img){ showToast('Produk ini belum punya foto','error'); return; }
+  try{
+    showToast('⏳ Menyiapkan foto...','info');
+    const res=await fetch(p.img.split('?')[0]);
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    const blob=await res.blob();
+    const ext=blob.type.includes('png')?'png':(blob.type.includes('webp')?'webp':'jpg');
+    const nama=(p.name||'produk').replace(/[\\/:*?"<>|]+/g,' ').replace(/\s+/g,'_').slice(0,80);
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url; a.download=nama+'.'+ext;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),1500);
+    showToast('Foto tersimpan','success');
+  }catch(err){
+    console.warn('Unduh foto gagal, buka di tab baru:',err);
+    window.open(p.img,'_blank');
+  }
 }
 function zoomDetailImg(){const src=document.getElementById('detailImgBox').dataset.src;if(src)zoomImg(src);}
 
