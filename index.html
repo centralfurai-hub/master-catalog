@@ -89,6 +89,10 @@ body{font-family:'Poppins','Inter','Segoe UI',system-ui,sans-serif;background:va
 #loginPage:not(.hidden) ~ * { pointer-events:none !important; }
 /* ── FIX FREEZE: setelah login berhasil, kembalikan pointer-events ke normal ── */
 #loginPage.hidden ~ * { pointer-events:auto !important; }
+/* ── FIX: modal Ubah Password (Tamu/SPG/Pemilik) harus bisa diklik di layar login ── */
+#loginPage:not(.hidden) ~ #modalGuestPwReset,
+#loginPage:not(.hidden) ~ #modalSpgPwReset,
+#loginPage:not(.hidden) ~ #modalOwnerPwReset { pointer-events:auto !important; }
 .login-card{background:var(--bg2);border:1px solid var(--bd2);border-radius:16px;padding:40px;width:380px;max-width:95vw;text-align:center;box-shadow:0 20px 80px rgba(0,0,0,0.8),0 0 0 1px rgba(201,168,76,0.06);}
 .login-logo{font-family:'Poppins','Inter',system-ui,sans-serif;font-size:26px;font-weight:700;letter-spacing:0px;margin-bottom:4px;color:var(--t);}
 .login-logo span{color:var(--gold);}
