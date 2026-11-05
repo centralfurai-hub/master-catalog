@@ -2593,6 +2593,39 @@ function slugifyProductName(name){
 // ============================================================
 // SUPABASE STORAGE — upload foto
 // ============================================================
+// Buat thumbnail JPEG (sisi terpanjang 480px) dari blob foto. Mengembalikan null jika gagal.
+function _makeThumbBlob(fileBlob){
+  return new Promise(resolve=>{
+    try{
+      const objUrl=URL.createObjectURL(fileBlob);
+      const im=new Image();
+      im.onload=()=>{
+        try{
+          const MAXS=480, sc=Math.min(1, MAXS/Math.max(im.width,im.height));
+          const w=Math.max(1,Math.round(im.width*sc)), h=Math.max(1,Math.round(im.height*sc));
+          const c=document.createElement('canvas'); c.width=w; c.height=h;
+          const cx=c.getContext('2d'); cx.fillStyle='#1e1e1e'; cx.fillRect(0,0,w,h); cx.drawImage(im,0,0,w,h);
+          c.toBlob(b=>{ URL.revokeObjectURL(objUrl); resolve(b); },'image/jpeg',0.78);
+        }catch(e){ URL.revokeObjectURL(objUrl); resolve(null); }
+      };
+      im.onerror=()=>{ URL.revokeObjectURL(objUrl); resolve(null); };
+      im.src=objUrl;
+    }catch(e){ resolve(null); }
+  });
+}
+// Unggah thumbnail ke bucket mc-thumbs dengan nama file sama. Best-effort: gagal = tidak mengganggu unggah foto.
+async function _uploadThumbToSupabase(fileBlob, filename){
+  try{
+    const tb=await _makeThumbBlob(fileBlob);
+    if(!tb || !tb.size) return false;
+    const res=await fetch(`${sbUrl}/storage/v1/object/mc-thumbs/${filename}`,{
+      method:'PUT',
+      headers:{'apikey':sbKey,'Authorization':'Bearer '+(sbAccessToken||sbKey),'Content-Type':'image/jpeg','x-upsert':'true','cache-control':'max-age=31536000'},
+      body:tb
+    });
+    return res.ok;
+  }catch(e){ console.warn('thumb upload (non-fatal):',e.message); return false; }
+}
 async function uploadFotoToSupabase(fileBlob, filename){
   if(sbMode!=='online') return null;
   try{
@@ -2619,8 +2652,10 @@ async function uploadFotoToSupabase(fileBlob, filename){
         throw new Error('Upload gagal ('+res.status+'): '+err2);
       }
     }
+    // Thumbnail otomatis (best-effort). th=1 menandai bahwa thumbnail sudah mutakhir untuk unggahan ini.
+    const thOk=await _uploadThumbToSupabase(fileBlob, filename);
     // Cache-busting agar browser tidak tampilkan foto lama dari cache
-    return `${sbUrl}/storage/v1/object/public/mc-photos/${filename}?t=${Date.now()}`;
+    return `${sbUrl}/storage/v1/object/public/mc-photos/${filename}?t=${Date.now()}${thOk?'&th=1':''}`;
   }catch(e){
     console.error('uploadFotoToSupabase:',e);
     showToast('⚠️ Gagal upload foto: '+e.message,'error');
@@ -2703,8 +2738,29 @@ function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;')
 // Solusi: retry otomatis 2x dengan jeda, baru fallback ke
 // placeholder YANG SUDAH ADA (tidak menambah elemen/desain baru).
 // ============================================================
+// ── Thumbnail (bucket mc-thumbs, sisi terpanjang 480px) ─────────────
+// Dipakai HANYA untuk tampilan kartu/daftar kecil. Detail, zoom, dan unduh tetap memakai foto asli.
+// Foto yang diunggah/diganti sesudah thumbnail dibuat (?t= >= THUMB_CUTOFF) tetap memakai foto asli
+// agar tidak menampilkan thumbnail lama. Jika thumbnail gagal dimuat, otomatis kembali ke foto asli.
+const THUMB_CUTOFF = 1793845594410; // 2026-11-05 02:26:34 UTC
+function thumbSrc(u){
+  if(typeof u!=='string') return u;
+  if(u.indexOf('/storage/v1/object/public/mc-photos/')<0) return u;
+  const q=u.match(/[?&]t=(\d+)/);
+  // Sesudah cutoff: pakai thumbnail HANYA jika URL bertanda th=1 (thumbnail dibuat otomatis saat unggah)
+  if(q && parseInt(q[1],10)>=THUMB_CUTOFF && !/[?&]th=1(&|$)/.test(u)) return u;
+  return u.replace('/storage/v1/object/public/mc-photos/','/storage/v1/object/public/mc-thumbs/');
+}
+function _thumbFallback(imgEl){
+  if(imgEl && imgEl.dataset && imgEl.dataset.full && imgEl.src.indexOf('/mc-thumbs/')>-1){
+    imgEl.src=imgEl.dataset.full; return true;
+  }
+  return false;
+}
+
 function _handleProductImgError(imgEl, fallbackType){
   if(!imgEl) return;
+  if(_thumbFallback(imgEl)) return;
   const tries=parseInt(imgEl.dataset.retry||'0',10);
   const rawSrc=imgEl.dataset.origSrc||imgEl.src;
   if(!imgEl.dataset.origSrc) imgEl.dataset.origSrc=rawSrc.split('?')[0];
@@ -4165,7 +4221,7 @@ function setDivView(el,view){
 function _buildCardHTML(p, isOwner, showHarga){
   const ready = getReadyStock(p);
   const imgTag   = p.img
-    ? `<img src="${esc(p.img)}" alt="${esc(p.name)}" loading="lazy" draggable="false" oncontextmenu="return false;" onerror="_handleProductImgError(this,'card')"/>`
+    ? `<img src="${esc(thumbSrc(p.img))}" data-full="${esc(p.img)}" alt="${esc(p.name)}" loading="lazy" decoding="async" draggable="false" oncontextmenu="return false;" onerror="_handleProductImgError(this,'card')"/>`
     : `<div class="product-img-placeholder">🛋️</div>`;
   const priceTag  = showHarga ? `<div class="product-price">${formatRp(p.harga||0)}</div>` : '';
   const dlBtn = (can('downloadFoto') && p.img)
@@ -5241,7 +5297,7 @@ function filterFotoProduk(){
         display:flex;align-items:center;gap:10px;transition:background 0.1s;
       " onmouseover="this.style.background='var(--bg4)'" onmouseout="this.style.background=''">
         <div style="width:32px;height:32px;border-radius:5px;overflow:hidden;background:var(--bg4);flex-shrink:0;display:flex;align-items:center;justify-content:center;">
-          ${hasImg?`<img src="${esc(p.img)}" loading="lazy" decoding="async" style="width:100%;height:100%;object-fit:cover;"/>`:'<span style="font-size:16px;">🛋️</span>'}
+          ${hasImg?`<img src="${esc(thumbSrc(p.img))}" data-full="${esc(p.img)}" loading="lazy" decoding="async" style="width:100%;height:100%;object-fit:cover;" onerror="_thumbFallback(this)"/>`:'<span style="font-size:16px;">🛋️</span>'}
         </div>
         <div style="flex:1;min-width:0;">
           <div style="font-size:12px;font-weight:500;color:var(--t);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(p.name)}</div>
@@ -5686,7 +5742,7 @@ function renderMergeDupList(){
         background:${isMaster?'rgba(201,168,76,0.08)':'var(--bg3)'};
         border:1px solid ${isMaster?'rgba(201,168,76,0.35)':'var(--bd)'};margin-bottom:6px;">
         <div style="width:44px;height:44px;flex-shrink:0;border-radius:6px;overflow:hidden;background:var(--bg4);display:flex;align-items:center;justify-content:center;">
-          ${p.img?`<img src="${esc(p.img)}" loading="lazy" decoding="async" style="width:100%;height:100%;object-fit:cover;" onerror="this.parentElement.innerHTML='🛋️'"/>`:'<span style="font-size:20px;">🛋️</span>'}
+          ${p.img?`<img src="${esc(thumbSrc(p.img))}" data-full="${esc(p.img)}" loading="lazy" decoding="async" style="width:100%;height:100%;object-fit:cover;" onerror="if(_thumbFallback(this))return;this.parentElement.innerHTML='🛋️'"/>`:'<span style="font-size:20px;">🛋️</span>'}
         </div>
         <div style="flex:1;min-width:0;">
           <div style="font-size:12px;font-weight:700;color:${isMaster?'var(--gold)':'var(--t)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
@@ -6262,6 +6318,11 @@ async function _deleteOldPhotoFromStorage(oldUrl){
     });
     if(delRes.ok){ /* foto lama dihapus dari storage */ }
     else console.warn('Delete storage non-ok status:',delRes.status,'file:',filename);
+    // Hapus thumbnail pasangannya (best-effort)
+    fetch(`${sbUrl}/storage/v1/object/mc-thumbs/${encodeURIComponent(filename)}`,{
+      method:'DELETE',
+      headers:{'apikey':sbKey,'Authorization':'Bearer '+(sbAccessToken||sbKey)}
+    }).catch(()=>{});
   }catch(e){
     console.warn('Gagal hapus foto lama (non-fatal):',e.message);
   }
@@ -7969,6 +8030,8 @@ function fotoCepatRender(){
     if(_fcFilter==='foto')   return !!p.img;
     return true;
   });
+  // Produk BELUM ada foto di paling atas (urutan lain tetap, sort stabil)
+  list=list.slice().sort((a,b)=>(a.img?1:0)-(b.img?1:0));
   const totalFoto=products.filter(p=>!!p.img).length;
   const el1=document.getElementById('fcStatTotal'),el2=document.getElementById('fcStatFoto'),el3=document.getElementById('fcStatKosong');
   if(el1) el1.textContent=products.length.toLocaleString('id');
@@ -8005,12 +8068,13 @@ function fotoCepatRender(){
     imgWrap.style.cssText='width:100%;aspect-ratio:1;background:var(--bg3);overflow:hidden;display:flex;align-items:center;justify-content:center;position:relative;';
     if(hasImg){
       const im=document.createElement('img');
-      im.loading='lazy'; im.decoding='async'; im.src=p.img; // lazy HARUS diset sebelum src, kalau tidak foto langsung diunduh semua
+      im.loading='lazy'; im.decoding='async'; im.dataset.full=p.img; im.src=thumbSrc(p.img); // lazy HARUS diset sebelum src, kalau tidak foto langsung diunduh semua
       im.style.cssText='width:100%;height:100%;object-fit:cover;display:block;';
       const fallback=document.createElement('div');
       fallback.style.cssText='display:none;position:absolute;inset:0;align-items:center;justify-content:center;font-size:36px;color:var(--t4);';
       fallback.textContent='🛋️';
       im.onerror=function(){
+        if(_thumbFallback(this)) return;
         const tries=parseInt(this.dataset.retry||'0',10);
         if(tries<2){
           this.dataset.retry=String(tries+1);
@@ -8308,7 +8372,7 @@ function renderStokHabis(){
     const ct=p.divisi?.Central||0,cl=p.divisi?.Celine||0,pa=p.divisi?.Panda||0;
     const titp=p.divisi?.Titipan||0,serv=p.divisi?.Servicean||0;
     const imgTag = p.img
-      ? `<img src="${esc(p.img)}" alt="${esc(p.name)}" loading="lazy" draggable="false" oncontextmenu="return false;" onerror="_handleProductImgError(this,'card')"/>`
+      ? `<img src="${esc(thumbSrc(p.img))}" data-full="${esc(p.img)}" alt="${esc(p.name)}" loading="lazy" decoding="async" draggable="false" oncontextmenu="return false;" onerror="_handleProductImgError(this,'card')"/>`
       : `<div class="product-img-placeholder">🛋️</div>`;
     const priceTag = showHarga ? `<div class="product-price">${formatRp(p.harga||0)}</div>` : '';
     const dlBtn = (can('downloadFoto') && p.img) ? `<div class="act-btn" onclick="downloadFoto('${p.id}',event)" title="Unduh foto produk">⬇️</div>` : '';
